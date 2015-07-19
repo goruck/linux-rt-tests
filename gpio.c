@@ -99,6 +99,19 @@ void setup_io()
 
 } // setup_io
 
+unsigned long waitCLKchange(int currentState)
+{
+  unsigned long c = 0;
+  while (GET_GPIO(PI_CLOCK_IN) == currentState)
+  {
+    t.tv_nsec += c;
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+    c += 50000; /* wait 50 us */
+    if (c > NSEC_PER_SEC) break;
+  }
+  return c; // time between change in nanoseconds
+}
+
 int main(int argc, char **argv)
 {
   #define MAX_DATA (10*1024) //10 KB
@@ -164,9 +177,9 @@ int main(int argc, char **argv)
     // sample clock again
     y = GET_GPIO(PI_CLOCK_IN);
     // check for a rising edge
-    if (y > x)
+    //if (y > x)
     // check for a falling edge
-    //if (x > y)
+    if (x > y)
       *data_ptr++ = GET_GPIO(PI_DATA_IN);
 
     // check for 1 second rollover

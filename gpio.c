@@ -51,15 +51,25 @@ volatile unsigned *gpio;
 #define GPIO_PULL *(gpio+37) // Pull up/pull down
 #define GPIO_PULLCLK0 *(gpio+38) // Pull up/pull down clock (BCM Clock 0)
 
-// GPIO mapping.
+// GPIO pin mapping.
 #define PI_CLOCK_IN	13
 #define PI_DATA_IN	5
 #define PI_DATA_OUT	6
 
+/*
+GPIO high and low level mapping.
+PI_CLOCK_IN and PI_DATA_IN get inverted in HW interface, so switch them here.
+*/
+#define PI_CLOCK_LO (1<<PI_CLOCK_IN)
+#define PI_CLOCK_HI (0)
+#define PI_DATA_LO  (1<<PI_DATA_IN)
+#define PI_DATA_HI  (0)
+
 // real-time
-#define MY_PRIORITY (90)
-#define MAX_SAFE_STACK (100*1024) // 100KB
-#define NSEC_PER_SEC (1000000000)
+#define MY_PRIORITY     (90)
+#define MAX_SAFE_STACK  (100*1024) // 100KB
+#define NSEC_PER_SEC    (1000000000)
+#define INTERVAL        (50000) // 50 uS
 
 // stack_prefault
 void stack_prefault(void) {
@@ -99,18 +109,32 @@ void setup_io()
 
 } // setup_io
 
+// Detect clock edge transition and measure the time it took.
 unsigned long waitCLKchange(int currentState)
 {
   unsigned long c = 0;
+  struct timespec t;
+  
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  
   while (GET_GPIO(PI_CLOCK_IN) == currentState)
   {
     t.tv_nsec += c;
+    
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
-    c += 50000; /* wait 50 us */
+    
+    c += INTERVAL;
+    
+    // check for a Second rollover
+    while(t.tv_nsec >= NSEC_PER_SEC) {
+      t.tv_nsec -= NSEC_PER_SEC;
+      t.tv_sec++; // Increment if interval has crossed over Second boundry.
+    }
+    
     if (c > NSEC_PER_SEC) break;
   }
   return c; // time between change in nanoseconds
-}
+} // waitCLKchange
 
 int main(int argc, char **argv)
 {
@@ -120,8 +144,8 @@ int main(int argc, char **argv)
   int *data_end = data + MAX_DATA - 1;
   FILE *out_file;
   struct sched_param param;
-  struct timespec t;
-  int interval = 50000; /* 50us */
+  //struct timespec t;
+  //int interval = 50000; /* 50us */
 
   /* Declare ourself as a real time task */
   param.sched_priority = MY_PRIORITY;
@@ -159,16 +183,17 @@ int main(int argc, char **argv)
   //ENB_GPIO_FEDGE = 1<<PI_CLOCK_IN;
   //ENB_GPIO_REDGE = 1<<PI_CLOCK_IN;
 
-  clock_gettime(CLOCK_MONOTONIC, &t);
+  //clock_gettime(CLOCK_MONOTONIC, &t);
   /* start after one second */
-  t.tv_sec++;
-  printf("starting t.tv_sec: %lu\n", t.tv_sec);
+  //t.tv_sec++;
+  //printf("starting t.tv_sec: %lu\n", t.tv_sec);
 
   data_ptr = data;
-  while(data_ptr < data_end) {
+  //while(data_ptr < data_end) {
     /* wait until next shot */
-    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+    //clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
 
+  /*
     // sample clock
     x = GET_GPIO(PI_CLOCK_IN);
     // wait an interval
@@ -181,15 +206,28 @@ int main(int argc, char **argv)
     // check for a falling edge
     if (x > y)
       *data_ptr++ = GET_GPIO(PI_DATA_IN);
-
+    */
+      
+    // Wait for the start of a new data word.
+    // This happens after the clock has been low for a long time, assumed here greater than 2 clk periods.
+    // Then wait for falling edge of clock and grab the data.
+    if (waitCLKchange(PI_CLK_IN_LO) > 2000)
+      while(data_ptr < data_end) {
+        if (waitCLKchange(PI_CLK_IN_HI) > 1000) {
+          printf("error - waited too long for clk to go low");
+          return 1;
+        }
+        *data_ptr++ = GET_GPIO(PI_DATA_IN);
+      }
+      
     // check for 1 second rollover
-    while(t.tv_nsec >= NSEC_PER_SEC) {
-      t.tv_nsec -= NSEC_PER_SEC;
-      t.tv_sec++; // if interval has crossed over a second boundry, then increment
-    }
+    //while(t.tv_nsec >= NSEC_PER_SEC) {
+    //  t.tv_nsec -= NSEC_PER_SEC;
+    //  t.tv_sec++; // if interval has crossed over a second boundry, then increment
+    //}
   }
 
-  printf("ending t.tv_sec: %lu\n", t.tv_sec);
+  //printf("ending t.tv_sec: %lu\n", t.tv_sec);
 
   // dump data array
   if ( (out_file = fopen ("data", "w")) == NULL )

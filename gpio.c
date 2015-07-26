@@ -57,19 +57,22 @@ volatile unsigned *gpio;
 #define PI_DATA_OUT	6
 
 /*
-GPIO high and low level mapping.
-PI_CLOCK_IN and PI_DATA_IN get inverted in HW interface, so switch them here.
+GPIO high and low level mapping. Invert signals.
 */
-#define PI_CLOCK_LO (1<<PI_CLOCK_IN)
-#define PI_CLOCK_HI (0)
-#define PI_DATA_LO  (1<<PI_DATA_IN)
-#define PI_DATA_HI  (0)
+#define PI_CLOCK_HI (1<<PI_CLOCK_IN)
+#define PI_CLOCK_LO (0)
+#define PI_DATA_HI  (1<<PI_DATA_IN)
+#define PI_DATA_LO  (0)
+
+// invert
+#define INV(g,s)	((1<<g) - s)
 
 // real-time
 #define MY_PRIORITY     (90)
 #define MAX_SAFE_STACK  (100*1024) // 100KB
 #define NSEC_PER_SEC    (1000000000)
-#define INTERVAL        (50000) // 50 uS
+#define INTERVAL        (10000) // 10 uS
+#define INTERVAL4	(4*INTERVAL)
 
 // stack_prefault
 void stack_prefault(void) {
@@ -109,43 +112,83 @@ void setup_io()
 
 } // setup_io
 
-// Detect clock edge transition and measure the time it took.
-unsigned long waitCLKchange(int currentState)
+/* using clock_nanosleep of librt */
+extern int clock_nanosleep(clockid_t __clock_id, int __flags,
+      __const struct timespec *__req,
+      struct timespec *__rem);
+
+/* the struct timespec consists of nanoseconds
+ * and seconds. if the nanoseconds are getting
+ * bigger than 1000000000 (= 1 second) the
+ * variable containing seconds has to be
+ * incremented and the nanoseconds decremented
+ * by 1000000000.
+ */
+static inline void tsnorm(struct timespec *ts)
+{
+   while (ts->tv_nsec >= NSEC_PER_SEC) {
+      ts->tv_nsec -= NSEC_PER_SEC;
+      ts->tv_sec++;
+   }
+}
+
+/*Detect clock rising edge and measure the time it took.
+static inline unsigned long waitCLKre(const struct timespec *t)
 {
   unsigned long c = 0;
-  struct timespec t;
-  
-  clock_gettime(CLOCK_MONOTONIC, &t);
-  
-  while (GET_GPIO(PI_CLOCK_IN) == currentState)
-  {
-    t.tv_nsec += c;
-    
-    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
-    
-    c += INTERVAL;
-    
-    // check for a Second rollover
-    while(t.tv_nsec >= NSEC_PER_SEC) {
-      t.tv_nsec -= NSEC_PER_SEC;
-      t.tv_sec++; // Increment if interval has crossed over Second boundry.
+  int x = 0, y = 0;
+
+  while (1) {
+    x = GET_GPIO(PI_CLOCK_IN);
+    t->tv_nsec += INTERVAL;
+    if (t->tv_nsec >= NSEC_PER_SEC) {
+      t->tv_nsec -= NSEC_PER_SEC;
+      t->tv_sec++;
     }
-    
-    if (c > NSEC_PER_SEC) break;
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+    y = GET_GPIO(PI_CLOCK_IN);
+    c += INTERVAL;
+    if (x < y) break;
   }
+
   return c; // time between change in nanoseconds
-} // waitCLKchange
+} // waitCLKre
+*/
+
+/*Detect clock falling edge and measure the time it took.
+unsigned long waitCLKfe(struct timespec *t)
+{
+  unsigned long c = 0;
+  int x = 0, y = 0;
+
+  while (1) {
+    x = GET_GPIO(PI_CLOCK_IN);
+    t->tv_nsec += INTERVAL;
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+    y = GET_GPIO(PI_CLOCK_IN);
+    if (y < x) break;
+    // check for a Second rollover
+    while(t->tv_nsec >= NSEC_PER_SEC) {
+      t->tv_nsec -= NSEC_PER_SEC;
+      t->tv_sec++; // Increment if interval has crossed over Second boundry.
+    }
+    c += INTERVAL;
+  }
+
+  return c; // time between change in nanoseconds
+} // waitCLKfe
+*/
 
 int main(int argc, char **argv)
 {
-  #define MAX_DATA (10*1024) //10 KB
+  #define MAX_DATA (10*1024) // 10 KB
   int data[MAX_DATA];
-  int *data_ptr, i=0, x=0, y=0;
+  int *data_ptr, i = 0, x1 = 0, x2 = 0, x3 = 0, x4 = 0;
   int *data_end = data + MAX_DATA - 1;
   FILE *out_file;
   struct sched_param param;
-  //struct timespec t;
-  //int interval = 50000; /* 50us */
+  unsigned long c = 0;
+  struct timespec t;
 
   /* Declare ourself as a real time task */
   param.sched_priority = MY_PRIORITY;
@@ -183,12 +226,12 @@ int main(int argc, char **argv)
   //ENB_GPIO_FEDGE = 1<<PI_CLOCK_IN;
   //ENB_GPIO_REDGE = 1<<PI_CLOCK_IN;
 
-  //clock_gettime(CLOCK_MONOTONIC, &t);
+  clock_gettime(CLOCK_MONOTONIC, &t);
   /* start after one second */
-  //t.tv_sec++;
+  t.tv_sec++;
   //printf("starting t.tv_sec: %lu\n", t.tv_sec);
 
-  data_ptr = data;
+  //data_ptr = data;
   //while(data_ptr < data_end) {
     /* wait until next shot */
     //clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
@@ -207,25 +250,50 @@ int main(int argc, char **argv)
     if (x > y)
       *data_ptr++ = GET_GPIO(PI_DATA_IN);
     */
-      
+
     // Wait for the start of a new data word.
     // This happens after the clock has been low for a long time, assumed here greater than 2 clk periods.
     // Then wait for falling edge of clock and grab the data.
-    if (waitCLKchange(PI_CLK_IN_LO) > 2000)
-      while(data_ptr < data_end) {
-        if (waitCLKchange(PI_CLK_IN_HI) > 1000) {
-          printf("error - waited too long for clk to go low");
-          return 1;
-        }
-        *data_ptr++ = GET_GPIO(PI_DATA_IN);
+    /*for (data_ptr = data; data_ptr < data_end; data_ptr++) {
+      while (1) {
+        if (GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) break;
       }
-      
+      while (GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) {
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+        t.tv_nsec += INTERVAL;
+        tsnorm(&t);
+        c += INTERVAL;
+      }
+      *data_ptr = GET_GPIO(PI_DATA_IN);
+      c = 0;
+    }*/
+
+    for (data_ptr = data; data_ptr < data_end; data_ptr++) {
+      while (1) {
+        if (GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) break;
+      }
+      while (GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) {
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+        t.tv_nsec += INTERVAL;
+        tsnorm(&t);
+        c += INTERVAL;
+      }
+      *data_ptr = GET_GPIO(PI_DATA_IN);
+      c = 0;
+    }
+
+    /*if (waitCLKfe() > 2000)
+      if (waitCLKfe() > 1000) {
+        printf("error - waited too long for clk to go low\n");
+        return 1;
+      }
+        *data_ptr++ = GET_GPIO(PI_DATA_IN);*/
+
     // check for 1 second rollover
     //while(t.tv_nsec >= NSEC_PER_SEC) {
     //  t.tv_nsec -= NSEC_PER_SEC;
     //  t.tv_sec++; // if interval has crossed over a second boundry, then increment
     //}
-  }
 
   //printf("ending t.tv_sec: %lu\n", t.tv_sec);
 
@@ -234,7 +302,7 @@ int main(int argc, char **argv)
     printf ("*** data could not be opened. \n" );
   else
     for ( i = 0; i < (MAX_DATA - 1); i++ )
-      fprintf ( out_file, "Data[%i]: %i\n", i, data[i] );
+      fprintf ( out_file, "%i %i\n", i, data[i] );
     fclose (out_file);
 
   /* Unlock memory */

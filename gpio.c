@@ -162,10 +162,11 @@ static inline long ts_diff(struct timespec *a, struct timespec *b)
 
 int main(int argc, char **argv)
 {
-  #define MAX_DATA (10*1024) // 1 KB
-  int data[MAX_DATA];
-  int *data_ptr, i = 0, flag, new_word;
-  int *data_end = data + MAX_DATA - 1;
+  #define MAX_BITS (43) // 43 bit data word
+  #define MAX_DATA (1*1024) // 1 KB buffer of 43-bit data words
+  int data[MAX_DATA][MAX_BITS];
+  //int (*data_ptr)[MAX_DATA][MAX_BITS] = &data, (*bit_ptr)[MAX_BITS] = data;
+  int i = 0, j = 0, flag = 0, bit_cnt = 0, data_cnt = 0;
   FILE *out_file;
   struct sched_param param;
   struct timespec t, tmark;
@@ -186,8 +187,9 @@ int main(int argc, char **argv)
   /* Pre-fault our stack */
   stack_prefault();
 
-  for(data_ptr = data; data_ptr < data_end; data_ptr++)
-    *data_ptr = 0;
+  for(i = 0; i < MAX_DATA; i++)
+    for(j = 0; j < MAX_BITS; j++)
+      data[i][j] = 0;
 
   // Set up gpio pointer for direct register access
   setup_io();
@@ -202,7 +204,6 @@ int main(int argc, char **argv)
   GPIO_CLR = 1<<PI_DATA_OUT;
 
   flag = 1;
-  data_ptr = data;
   clock_gettime(CLOCK_MONOTONIC, &t);
   tmark = t;
   while (1) {
@@ -210,23 +211,27 @@ int main(int argc, char **argv)
     tnorm(&t);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
     if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) {
-      *data_ptr++ = GET_GPIO(PI_DATA_IN);
+      data[data_cnt][bit_cnt++] = GET_GPIO(PI_DATA_IN);
+      if (ts_diff(&t, &tmark) > CLK_BLANK) { // start new word
+        bit_cnt = 0;
+        data_cnt++;
+      }
       flag = 0;
-      new_word = (ts_diff(&t, &tmark) > CLK_BLANK) ? 1 : 0;
       tmark = t;
     }
     else if (GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI)
       flag = 1;
-    if (data_ptr > data_end)
+    if (data_cnt == MAX_DATA)
       break;
   }
 
-  // dump data array
+  // dump buffer
   if ( (out_file = fopen ("data", "w")) == NULL )
     printf ("*** data could not be opened. \n" );
   else
-    for ( i = 0; i < (MAX_DATA - 1); i++ )
-      fprintf ( out_file, "%i %i\n", i, data[i] );
+    for ( i = 0; i < MAX_DATA; i++ )
+      for ( j = 0; j < MAX_BITS; j++)
+        fprintf ( out_file, "%i, %i, %i\n", i, j, data[i][j] );
     fclose (out_file);
 
   /* Unlock memory */

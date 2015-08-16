@@ -57,7 +57,7 @@ volatile unsigned *gpio;
 #define PI_DATA_OUT	6
 
 /*
-GPIO high and low level mapping. Invert signals.
+GPIO high and low level mapping.
 */
 #define PI_CLOCK_HI (1<<PI_CLOCK_IN)
 #define PI_CLOCK_LO (0)
@@ -74,6 +74,7 @@ GPIO high and low level mapping. Invert signals.
 #define INTERVAL        (10*1000) // 10 uS timeslice.
 #define CLK_PER		1000000L // 1 mS clock period.
 #define HALF_CLK_PER	500000L // 0.5 mS half clock period.
+#define SAMPLE_OFFSET   750000L // 0.75 mS sample offset from rising edge clk
 #define CLK_BLANK	5000000L // 5 mS min clock blank.
 
 // stack_prefault
@@ -160,9 +161,22 @@ static inline long ts_diff(struct timespec *a, struct timespec *b)
   return (x - y);
 }
 
+unsigned int getBinaryData(int st[50], int offset, int length)
+{
+  int buf = 0, j;
+
+  for (j = 0; j< length; j++)
+  {
+    buf <<=1;
+    if (st[offset + j] == 1) buf |= 1;
+  }
+
+  return buf;
+}
+
 int main(int argc, char **argv)
 {
-  #define MAX_BITS (43) // 43 bit data word
+  #define MAX_BITS (50) // 50 bit data word
   #define MAX_DATA (1*1024) // 1 KB buffer of 43-bit data words
   int data[MAX_DATA][MAX_BITS];
   //int (*data_ptr)[MAX_DATA][MAX_BITS] = &data, (*bit_ptr)[MAX_BITS] = data;
@@ -203,36 +217,42 @@ int main(int argc, char **argv)
   // Set PI_DATA_OUT pin low.
   GPIO_CLR = 1<<PI_DATA_OUT;
 
-  flag = 1;
   clock_gettime(CLOCK_MONOTONIC, &t);
   tmark = t;
   while (1) {
     t.tv_nsec += INTERVAL;
     tnorm(&t);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
-    if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) {
-      data[data_cnt][bit_cnt++] = GET_GPIO(PI_DATA_IN);
+    if (GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) flag = 1;
+    else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) {
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait for valid data
       if (ts_diff(&t, &tmark) > CLK_BLANK) { // start new word
         bit_cnt = 0;
         data_cnt++;
       }
-      flag = 0;
+      data[data_cnt][bit_cnt] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? 0 : 1;
+//printf("pi_data:%i,data[%i][%i]:%i\n",GET_GPIO(PI_DATA_IN),data_cnt,bit_cnt,data[data_cnt][bit_cnt]);
+      bit_cnt++;
       tmark = t;
+      flag = 0;
     }
-    else if (GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI)
-      flag = 1;
+//printf("data[%i][%i]:%i,t:%lu,flag:%i\n",data_cnt,bit_cnt,data[data_cnt][bit_cnt],t.tv_nsec,flag);
     if (data_cnt == MAX_DATA)
       break;
   }
 
-  // dump buffer
+  // decode and write to file
   if ( (out_file = fopen ("data", "w")) == NULL )
     printf ("*** data could not be opened. \n" );
   else
-    for ( i = 0; i < MAX_DATA; i++ )
+    for ( i = 0; i < MAX_DATA; i++ ) {
+      fprintf (out_file, "i:%i,cmd:0x%02x\n", i, getBinaryData(data[i],0,8));
       for ( j = 0; j < MAX_BITS; j++)
-        fprintf ( out_file, "%i, %i, %i\n", i, j, data[i][j] );
-    fclose (out_file);
+        fprintf (out_file, "data[%i][%i]:%i\n",i,j,data[i][j]);
+    }
+  fclose (out_file);
 
   /* Unlock memory */
   if(munlockall() == -1) {

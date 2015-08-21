@@ -177,10 +177,11 @@ unsigned int getBinaryData(int st[50], int offset, int length)
 int main(int argc, char **argv)
 {
   #define MAX_BITS (50) // 50 bit data word
-  #define MAX_DATA (1*1024) // 1 KB buffer of 43-bit data words
+  #define MAX_DATA (2*1024) // 2 KB buffer of 43-bit data words - ~140 seconds
   int data[MAX_DATA][MAX_BITS];
   //int (*data_ptr)[MAX_DATA][MAX_BITS] = &data, (*bit_ptr)[MAX_BITS] = data;
   int i = 0, j = 0, flag = 0, bit_cnt = 0, data_cnt = 0, zones, cmd;
+  int data0,data1,data2,data3,data4,data5,data6;
   FILE *out_file;
   struct sched_param param;
   struct timespec t, tmark;
@@ -221,43 +222,41 @@ int main(int argc, char **argv)
   clock_gettime(CLOCK_MONOTONIC, &t);
   tmark = t;
   while (1) {
+//printf("pi_data:%i,data[%i][%i]:%i\n",GET_GPIO(PI_DATA_IN),data_cnt,bit_cnt,data[data_cnt][bit_cnt]);
     t.tv_nsec += INTERVAL;
     tnorm(&t);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
     if (GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) flag = 1;
     else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) {
-      if (ts_diff(&t, &tmark) > CLK_BLANK) { // start new word
+      if (ts_diff(&t, &tmark) > 1100000) { // start new word
         bit_cnt = 0;
         data_cnt++;
       }
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait 100 uS for valid data
-      data[data_cnt][bit_cnt] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? 0 : 1;
-//printf("pi_data:%i,data[%i][%i]:%i\n",GET_GPIO(PI_DATA_IN),data_cnt,bit_cnt,data[data_cnt][bit_cnt]);
       tmark = t;
-      bit_cnt++;
       flag = 0;
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      /*t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);*/
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait 40 uS for valid data
+      data[data_cnt][bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? 0 : 1;
     }
-//printf("data[%i][%i]:%i,t:%lu,flag:%i\n",data_cnt,bit_cnt,data[data_cnt][bit_cnt],t.tv_nsec,flag);
     if (data_cnt == MAX_DATA)
       break;
   }
@@ -297,7 +296,7 @@ int main(int argc, char **argv)
         strcat(msg, minute);
       }*/
       else if (cmd == 0x27) {
-        strcpy(msg, "Zones: ");
+        strcpy(msg, "Zone1: ");
         zones = getBinaryData(data[i],41,8);
         if (zones & 1) strcat(msg, "1 ");
         if (zones & 2) strcat(msg, "2 ");
@@ -309,7 +308,31 @@ int main(int argc, char **argv)
         if (zones & 128) strcat(msg, "8 ");
       }
       else if (cmd == 0x2d) {
-        strcpy(msg, "Zones: ");
+        strcpy(msg, "Zone2: ");
+        zones = getBinaryData(data[i],41,8);
+        if (zones & 1) strcat(msg, "9 ");
+        if (zones & 2) strcat(msg, "10 ");
+        if (zones & 4) strcat(msg, "11 ");
+        if (zones & 8) strcat(msg, "12 ");
+        if (zones & 16) strcat(msg, "13 ");
+        if (zones & 32) strcat(msg, "14 ");
+        if (zones & 64) strcat(msg, "15 ");
+        if (zones & 128) strcat(msg, "16 ");
+      }
+      else if (cmd == 0x34) {
+        strcpy(msg, "Zone3: ");
+        zones = getBinaryData(data[i],41,8);
+        if (zones & 1) strcat(msg, "9 ");
+        if (zones & 2) strcat(msg, "10 ");
+        if (zones & 4) strcat(msg, "11 ");
+        if (zones & 8) strcat(msg, "12 ");
+        if (zones & 16) strcat(msg, "13 ");
+        if (zones & 32) strcat(msg, "14 ");
+        if (zones & 64) strcat(msg, "15 ");
+        if (zones & 128) strcat(msg, "16 ");
+      }
+      else if (cmd == 0x3e) {
+        strcpy(msg, "Zone4: ");
         zones = getBinaryData(data[i],41,8);
         if (zones & 1) strcat(msg, "9 ");
         if (zones & 2) strcat(msg, "10 ");
@@ -322,7 +345,12 @@ int main(int argc, char **argv)
       }
       else
         strcpy(msg, "Unknown command.");
+      data0 = getBinaryData(data[i],0,8);  data1 = getBinaryData(data[i],8,8);
+      data2 = getBinaryData(data[i],16,8); data3 = getBinaryData(data[i],24,8);
+      data4 = getBinaryData(data[i],32,8); data5 = getBinaryData(data[i],40,8);
+      data6 = getBinaryData(data[i],48,2);
       fprintf (out_file, "data[%i],cmd:0x%02x,%s\n", i, cmd, msg);
+      fprintf (out_file, "***data-all: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",data0,data1,data2,data3,data4,data5,data6);
     }
   fclose (out_file);
 

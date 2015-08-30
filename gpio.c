@@ -161,14 +161,14 @@ static inline long ts_diff(struct timespec *a, struct timespec *b)
   return (x - y);
 }
 
-unsigned int getBinaryData(int st[50], int offset, int length)
+unsigned int getBinaryData(char st[50], int offset, int length)
 {
   unsigned int buf = 0, j;
 
   for (j = 0; j< length; j++)
   {
     buf <<=1;
-    if (st[offset + j] == 1) buf |= 1;
+    if (st[offset + j] == '1') buf |= 1;
   }
 
   return buf;
@@ -177,15 +177,16 @@ unsigned int getBinaryData(int st[50], int offset, int length)
 int main(int argc, char **argv)
 {
   #define MAX_BITS (50) // 50 bit data word
-  #define MAX_DATA (2*1024) // 2 KB buffer of 43-bit data words - ~140 seconds
-  int data[MAX_DATA][MAX_BITS];
+  #define MAX_DATA (1*1024) // 1 KB buffer of 43-bit data words - ~70 seconds
+  char data[MAX_DATA][MAX_BITS];
   //int (*data_ptr)[MAX_DATA][MAX_BITS] = &data, (*bit_ptr)[MAX_BITS] = data;
   int i = 0, j = 0, flag = 0, bit_cnt = 0, data_cnt = 0, zones, cmd;
   int data0,data1,data2,data3,data4,data5,data6;
+  char year3[2],year4[2],month[2],day[2],hour[2],minute[2];
   FILE *out_file;
   struct sched_param param;
   struct timespec t, tmark;
-  char msg[100] = "";
+  char msg[100] = "", oldMsg[100] = "";
 
   /* Declare ourself as a real time task */
   param.sched_priority = MY_PRIORITY;
@@ -205,7 +206,7 @@ int main(int argc, char **argv)
 
   for(i = 0; i < MAX_DATA; i++)
     for(j = 0; j < MAX_BITS; j++)
-      data[i][j] = 0;
+      data[i][j] = '0';
 
   // Set up gpio pointer for direct register access
   setup_io();
@@ -242,6 +243,8 @@ int main(int argc, char **argv)
       tnorm(&t);
       t.tv_nsec += INTERVAL;
       tnorm(&t);
+      t.tv_nsec += INTERVAL;
+      tnorm(&t);
       /*t.tv_nsec += INTERVAL;
       tnorm(&t);
       t.tv_nsec += INTERVAL;
@@ -251,11 +254,9 @@ int main(int argc, char **argv)
       t.tv_nsec += INTERVAL;
       tnorm(&t);
       t.tv_nsec += INTERVAL;
-      tnorm(&t);
-      t.tv_nsec += INTERVAL;
       tnorm(&t);*/
-      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait 40 uS for valid data
-      data[data_cnt][bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? 0 : 1;
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait 50 uS for valid data
+      data[data_cnt][bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1';
     }
     if (data_cnt == MAX_DATA)
       break;
@@ -275,15 +276,15 @@ int main(int argc, char **argv)
         if (getBinaryData(data[i],14,1)) strcat(msg, "Memory ");
         if (getBinaryData(data[i],15,1)) strcat(msg, "Armed ");
         if (getBinaryData(data[i],16,1)) strcat(msg, "Ready ");
-      }/*
+      }
       else if (cmd == 0xa5) {
-        char year3 = (char) getBinaryData(data[i],9,4);
-        char year4 = (char) getBinaryData(data[i],13,4);
-        char month = (char) getBinaryData(data[i],19,4);
-        char day = (char) getBinaryData(data[i],23,5);
-        char hour = (char) getBinaryData(data[i],28,5);
-        char minute = (char) getBinaryData(data[i],33,6);
-        strcpy(msg, "Data: 20");
+        sprintf(year3, "%d", getBinaryData(data[i],9,4));
+        sprintf(year4, "%d", getBinaryData(data[i],13,4));
+        sprintf(month, "%d", getBinaryData(data[i],19,4));
+        sprintf(day, "%d", getBinaryData(data[i],23,5));
+        sprintf(hour, "%d", getBinaryData(data[i],28,5));
+        sprintf(minute, "%d", getBinaryData(data[i],33,6));
+        strcpy(msg, "Date: 20");
         strcat(msg, year3);
         strcat(msg, year4);
         strcat(msg, "-");
@@ -294,7 +295,7 @@ int main(int argc, char **argv)
         strcat(msg, hour);
         strcat(msg, ":");
         strcat(msg, minute);
-      }*/
+      }
       else if (cmd == 0x27) {
         strcpy(msg, "Zone1: ");
         zones = getBinaryData(data[i],41,8);
@@ -349,8 +350,11 @@ int main(int argc, char **argv)
       data2 = getBinaryData(data[i],16,8); data3 = getBinaryData(data[i],24,8);
       data4 = getBinaryData(data[i],32,8); data5 = getBinaryData(data[i],40,8);
       data6 = getBinaryData(data[i],48,2);
-      fprintf (out_file, "data[%i],cmd:0x%02x,%s\n", i, cmd, msg);
-      fprintf (out_file, "***data-all: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",data0,data1,data2,data3,data4,data5,data6);
+      if (strcmp(msg, oldMsg) != 0) {
+        fprintf (out_file, "data[%i],cmd:0x%02x,%s\n", i, cmd, msg);
+        fprintf (out_file, "***data-all: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",data0,data1,data2,data3,data4,data5,data6);
+        strcpy(oldMsg, msg);
+      }
     }
   fclose (out_file);
 

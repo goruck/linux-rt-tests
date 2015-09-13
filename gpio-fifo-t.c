@@ -4,6 +4,8 @@ gpio-fifo-t.c - threaded version.
 
 compile with "gcc -Wall -o gpio-fifo-t gpio-fifo-t.c -lrt -lpthread"
 
+must run under linux PREEMPT_RT kernel 3.18.9-rt5-v7
+
 Lindo St. Angel 2015. 
 
 */

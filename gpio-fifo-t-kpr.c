@@ -262,7 +262,7 @@ static int decode(char * word, char * msg) {
   cmd = getBinaryData(word,0,8);
   strcpy(msg, "");
   if (cmd == 0x05) {
-    strcpy(msg, "LED Status: ");
+    strcpy(msg, "p->k LED Status: ");
     if (getBinaryData(word,12,1)) strcat(msg, "Error ");
     if (getBinaryData(word,13,1)) strcat(msg, "Bypass ");
     if (getBinaryData(word,14,1)) strcat(msg, "Memory ");
@@ -276,7 +276,7 @@ static int decode(char * word, char * msg) {
     sprintf(day, "%d", getBinaryData(word,23,5));
     sprintf(hour, "%d", getBinaryData(word,28,5));
     sprintf(minute, "%d", getBinaryData(word,33,6));
-    strcpy(msg, "Date: 20");
+    strcpy(msg, "p->k Date: 20");
     strcat(msg, year3);
     strcat(msg, year4);
     strcat(msg, "-");
@@ -289,7 +289,7 @@ static int decode(char * word, char * msg) {
     strcat(msg, minute);
   }
   else if (cmd == 0x27) {
-    strcpy(msg, "Zone1: ");
+    strcpy(msg, "p->k Zone1: ");
     zones = getBinaryData(word,41,8);
     if (zones & 1) strcat(msg, "1 ");
     if (zones & 2) strcat(msg, "2 ");
@@ -301,7 +301,7 @@ static int decode(char * word, char * msg) {
     if (zones & 128) strcat(msg, "8 ");
   }
   else if (cmd == 0x2d) {
-    strcpy(msg, "Zone2: ");
+    strcpy(msg, "p->k Zone2: ");
     zones = getBinaryData(word,41,8);
     if (zones & 1) strcat(msg, "9 ");
     if (zones & 2) strcat(msg, "10 ");
@@ -313,7 +313,7 @@ static int decode(char * word, char * msg) {
     if (zones & 128) strcat(msg, "16 ");
   }
   else if (cmd == 0x34) {
-    strcpy(msg, "Zone3: ");
+    strcpy(msg, "p->k Zone3: ");
     zones = getBinaryData(word,41,8);
     if (zones & 1) strcat(msg, "9 ");
     if (zones & 2) strcat(msg, "10 ");
@@ -325,7 +325,7 @@ static int decode(char * word, char * msg) {
     if (zones & 128) strcat(msg, "16 ");
   }
   else if (cmd == 0x3e) {
-    strcpy(msg, "Zone4: ");
+    strcpy(msg, "p->k Zone4: ");
     zones = getBinaryData(word,41,8);
     if (zones & 1) strcat(msg, "9 ");
     if (zones & 2) strcat(msg, "10 ");
@@ -337,14 +337,14 @@ static int decode(char * word, char * msg) {
     if (zones & 128) strcat(msg, "16 ");
   }
   else if (cmd == 0xff) {
-    strcpy(msg, "keypad: ");
-    if (getBinaryData(word,48,8) == 0x7f)
-      strcat(msg, "sent msg.");
+    strcpy(msg, "k->p ");
+    if (getBinaryData(word,8,8) == 0xc2)
+      strcat(msg, "arm/disarm.");
     else
-      strcat(msg, "didn't send msg.");
+      strcat(msg, "null or unknown msg.");
   }
   else
-    strcpy(msg, "Unknown command.");
+    strcpy(msg, "p->k unknown command.");
 
   return cmd; // return command associated with the message
 
@@ -386,7 +386,9 @@ static void * panel_io(void * f) {
           perror("panel_io: signal failed\n");
           exit(-1);
         }
-        bit_cnt = 0; // reset bit counter
+        bit_cnt = 0; // reset bit counter and arrays
+        memset(&word[0], 0, sizeof(word));
+        memset(&wordk[0], 0, sizeof(wordk));
       }
       tmark = t;
       flag = 0;

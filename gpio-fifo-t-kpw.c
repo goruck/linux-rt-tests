@@ -1,8 +1,8 @@
 /*
 
-gpio-fifo-t-kpr.c - test build to read keypad based off threaded version.
+gpio-fifo-t-kpw.c - test build to write keypad data to panel based off threaded version.
 
-compile with "gcc -Wall -o gpio-fifo-t-kpr gpio-fifo-t-kpr.c -lrt -lpthread"
+compile with "gcc -Wall -o gpio-fifo-t-kpw gpio-fifo-t-kpw.c -lrt -lpthread"
 
 must run under linux PREEMPT_RT kernel 3.18.9-rt5-v7
 
@@ -79,6 +79,7 @@ Lindo St. Angel 2015.
 #define CLK_PER		(1000000L) // 1 ms clock period.
 #define HALF_CLK_PER	(500000L) // 0.5 ms half clock period.
 #define SAMPLE_OFFSET   (120000L) // 0.12 ms sample offset from clk edge
+#define HOLD_DATA	(450000L) // 0.45 ms data hold time from clk edge
 #define CLK_BLANK	(5000000L) // 5 ms min clock blank.
 #define NEW_WORD_VALID	(1100000L) // if a bit comes < than 1.1 ms, declare start of new word.
 #define MAX_BITS	(64) // max 64-bit word read from panel
@@ -98,6 +99,12 @@ struct fifo {
   int head;
   int tail;
   int size;
+};
+
+// struct of two fifos to pass to pthreads
+struct fifos {
+  struct fifo fifo1;
+  struct fifo fifo2;
 };
 
 // stack_prefault
@@ -350,11 +357,69 @@ static int decode(char * word, char * msg) {
 
 } // decode
 
+static int hex2bin(char * hex, char * bin) {
+  int i, j;
+
+  // convert hex to bin
+  for (j = 0; j < 7; j++)
+    for (i = 0; i < 16; i++) {
+      switch (hex[i]) {
+        case '0':
+            strcat(bin, "0000"); break;
+        case '1':
+            strcat(bin, "0001"); break;
+        case '2':
+            strcat(bin, "0010"); break;
+        case '3':
+            strcat(bin, "0011"); break;
+        case '4':
+            strcat(bin, "0100"); break;
+        case '5':
+            strcat(bin, "0101"); break;
+        case '6':
+            strcat(bin, "0110"); break;
+        case '7':
+            strcat(bin, "0111"); break;
+        case '8':
+            strcat(bin, "1000"); break;
+        case '9':
+            strcat(bin, "1001"); break;
+        case 'a':
+            strcat(bin, "1010"); break;
+        case 'b':
+            strcat(bin, "1011"); break;
+        case 'c':
+            strcat(bin, "1100"); break;
+        case 'd':
+            strcat(bin, "1101"); break;
+        case 'e':
+            strcat(bin, "1110"); break;
+        case 'f':
+            strcat(bin, "1111"); break;
+        default:
+            printf("\n Invalid hex digit %c ", hex[i]);
+            return 0;
+        }
+      }
+
+  return 1;
+} // hex2 bin
+
 // panel io thread
 static void * panel_io(void * f) {
-  char word[MAX_BITS] = "", wordk[MAX_BITS] = "", wordk_temp = '0';
+  char word[MAX_BITS] = "", wordk[MAX_BITS] = "";
   int flag = 0, bit_cnt = 0;
   struct timespec t, tmark;
+  struct fifos * fx;
+  struct fifo fifoa, fifob;
+
+  fx = (struct fifos *) f;
+  fifoa = fx->fifo1; // data from panel to keypad
+  fifob = fx->fifo2; // data from keypad to panel
+
+//printf("size1: %i size2: %i\n", fifoa.size, fifob.size);
+
+  memset(&wordk[0], 0, sizeof(wordk));
 
   clock_gettime(CLOCK_MONOTONIC, &t);
   tmark = t;
@@ -363,40 +428,49 @@ static void * panel_io(void * f) {
     tnorm(&t);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
     if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) && (flag == 0)) {
-      flag = 1;
-      t.tv_nsec += SAMPLE_OFFSET;
-      tnorm(&t);
-      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait SAMPLE_OFFSET for valid data
-      wordk_temp = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1';
-    }
-    else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) {
       if (ts_diff(&t, &tmark) > NEW_WORD_VALID) { // check for new word
-        fifo_write((struct fifo *) f, wordk, MAX_BITS); // write current keypad word to FIFO
-        fifo_write((struct fifo *) f, word, MAX_BITS); // write current panel word to FIFO
-        if (pthread_mutex_lock(&mtx) != 0) {
+        fifo_write(&(((struct fifos *) f)->fifo1), word, MAX_BITS); // write current panel word to FIFO
+        if (pthread_mutex_lock(&mtx) != 0) { // avail global protection mutex
           perror("panel_io: can't lock mutex\n");
           exit(-1);
         }
-        avail += 2; // Let decode know another keypad and panel word is avail.
+        avail += 1; // number of words for message i/o thread to process
         if (pthread_mutex_unlock(&mtx) != 0) {
           perror("panel_io: can't unlock mutex\n");
           exit(-1);
         }
-        if (pthread_cond_signal(&cond) != 0) { // Wake decode.
+        if (pthread_cond_signal(&cond) != 0) { // wake message i/o thread
           perror("panel_io: signal failed\n");
           exit(-1);
         }
-        bit_cnt = 0; // reset bit counter and arrays
-        memset(&word[0], 0, sizeof(word));
-        memset(&wordk[0], 0, sizeof(wordk));
+        fifo_read(&(((struct fifos *) f)->fifo2), wordk, MAX_BITS); // get a keypad command to send to panel
+        bit_cnt = 0; // reset bit counter
+        memset(&word[0], 0, sizeof(word)); // clear panel word array
       }
-      tmark = t;
+      tmark = t; // mark new word time
+      flag = 1; // set flag to indicate clock was high
+//printf("bit_cnt %i\n", bit_cnt);
+      // write keypad data bit to panel once every time clock is high
+      if (wordk[bit_cnt] == '1') // invert
+        GPIO_SET = 1<<PI_DATA_OUT; // set GPIO
+      else if (wordk[bit_cnt] == '0') // invert
+        GPIO_CLR = 1<<PI_DATA_OUT; // clear GPIO
+      else {
+        GPIO_CLR = 1<<PI_DATA_OUT; // clear GPIO
+        perror("panel_io: bad element in keypad data array wordk\n");
+        //exit(-1);
+      }
+      t.tv_nsec += HOLD_DATA;
+      tnorm(&t);
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait HOLD_DATA time
+      GPIO_CLR = 1<<PI_DATA_OUT; // leave with GPIO cleared
+    }
+    else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) {
       flag = 0;
       t.tv_nsec += SAMPLE_OFFSET;
       tnorm(&t);
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait SAMPLE_OFFSET for valid data
-      wordk[bit_cnt] = wordk_temp;
-      word[bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1';
+      word[bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1'; // invert
     }
   }
   pthread_exit("panel io thread finished");
@@ -404,25 +478,46 @@ static void * panel_io(void * f) {
 
 // message i/o thread
 static void * msg_io(void * f) {
-  int cmd = 0;
+  int cmd = 0, i = 0;
   int data0 = 0, data1 = 0, data2 = 0, data3 = 0;
   int data4 = 0, data5 = 0, data6 = 0, data7 = 0;
   char msg[50] = "", oldMsg[50] = "";
-  char word[MAX_BITS] = "";
+  char word[MAX_BITS] = "", wordk[MAX_BITS] = "";
+  struct fifos * fx;
+  struct fifo fifoa, fifob;
+
+  // enter into prog mode: 0xff 0xd4 0x7f 0xff 0xff 0xe0 0x00 0x00
+  //const char * enter_prog = "1111111111010100011111111111111111111111111000000000000000000000";
+  const char * enter_prog = "0101010101010101010101010101010101010101010101010101010101010101";
+  // exit prog mode:       0xff 0xd6 0xff 0xff 0xff 0xe0 0x00 0x00
+  //const char * exit_prog  = "1111111111010110011111111111111111111111111000000000000000000000";
+  const char * exit_prog  = "1010101010101010101010101010101010101010101010101010101010101010";
+  // idle:                 0xff 0xff 0xff 0xff 0xff 0xff 0xff 0xff
+  const char * idle       = "1111111111111111111111111111111111111111111111111111111111111111";
+
+  memset(&wordk[0], 0, sizeof(wordk));
+  strncpy(wordk, idle, MAX_BITS);
+
+  fx = (struct fifos *) f;
+  fifoa = fx->fifo1; // data from panel to keypad
+  fifob = fx->fifo2; // data from keypad to panel
+
+//printf("size1: %i size2: %i\n", fifoa.size, fifob.size);
 
   while (1) {
-      if (pthread_mutex_lock(&mtx) != 0) {
+      if (pthread_mutex_lock(&mtx) != 0) { // avail global protection mutex
         perror("msg_io: can't lock mutex\n");
         exit(-1);
       }
-      while(avail == 0)
+      while(avail == 0) // wait for signal from panel i/o thread to wake
         if (pthread_cond_wait(&cond, &mtx) != 0) {
           perror("msg_io: wait failed\n");
           exit(-1);
         }
       while(avail > 0) {
-        fifo_read((struct fifo *) f, word, MAX_BITS);
-        cmd = decode(word, msg); // get panel command and decode word from panel into a message
+        fifo_write(&(((struct fifos *) f)->fifo2), wordk, MAX_BITS); // send keypad data to panel
+        fifo_read(&(((struct fifos *) f)->fifo1), word, MAX_BITS); // get panel data to keypads
+        cmd = decode(word, msg); // decode word from panel into a message
         data0 = getBinaryData(word,0,8);  data1 = getBinaryData(word,8,8);
         data2 = getBinaryData(word,16,8); data3 = getBinaryData(word,24,8);
         data4 = getBinaryData(word,32,8); data5 = getBinaryData(word,40,8);
@@ -437,6 +532,11 @@ static void * msg_io(void * f) {
           strcpy(oldMsg, msg);
         }
         avail--;
+        if (i == 0)	  strncpy(wordk, enter_prog, MAX_BITS);
+        else if (i == 2)  strncpy(wordk, exit_prog, MAX_BITS);
+        else		  strncpy(wordk, idle, MAX_BITS);
+        if (i < 4) i++;
+        else i = 0;
         if (pthread_mutex_unlock(&mtx) != 0) {
           perror("msg_io: can't unlock mutex\n");
           exit(-1);
@@ -449,10 +549,11 @@ static void * msg_io(void * f) {
 
 int main(int argc, char *argv[])
 {
-  char data[MAX_DATA*MAX_BITS] = "";
+  char panelData[MAX_DATA*MAX_BITS] = "", keypadData[MAX_DATA*MAX_BITS] = "";
   int res = 0;
   struct sched_param param_main, param_pio;
-  struct fifo dataFifo;
+  struct fifo panelFifo, keypadFifo;
+  struct fifos f;
   pthread_t pio_thread, mio_thread;
   pthread_attr_t my_attr;
   void *thread_result;
@@ -486,8 +587,13 @@ int main(int argc, char *argv[])
   // Set up gpio pointer for direct register access
   setup_io();
 
-  // Set up FIFO
-  fifo_init(&dataFifo, data, MAX_DATA*MAX_BITS);
+  // Set up FIFOs
+  fifo_init(&panelFifo, panelData, MAX_DATA*MAX_BITS);
+  fifo_init(&keypadFifo, keypadData, MAX_DATA*MAX_BITS);
+  f.fifo1 = panelFifo;
+  f.fifo2 = keypadFifo;
+
+//printf("size1: %i size2: %i\n", f.fifo1.size, f.fifo2.size);
 
   // Set pin direction
   INP_GPIO(PI_DATA_OUT); // must use INP_GPIO before we can use OUT_GPIO
@@ -504,7 +610,7 @@ int main(int argc, char *argv[])
   pthread_attr_setschedpolicy(&my_attr, SCHED_FIFO);
   param_pio.sched_priority = PANEL_IO_PRI;
   pthread_attr_setschedparam(&my_attr, &param_pio);
-  res = pthread_create(&pio_thread, &my_attr, panel_io, (void *) &dataFifo);
+  res = pthread_create(&pio_thread, &my_attr, panel_io, (void *) &f);
   if (res != 0) {
     perror("Panel i/o thread creation failed");
     exit(EXIT_FAILURE);
@@ -517,7 +623,7 @@ int main(int argc, char *argv[])
   pthread_attr_setschedpolicy(&my_attr, SCHED_FIFO);
   param_pio.sched_priority = MSG_IO_PRI;
   pthread_attr_setschedparam(&my_attr, &param_pio);
-  res = pthread_create(&mio_thread, &my_attr, msg_io, (void *) &dataFifo);
+  res = pthread_create(&mio_thread, &my_attr, msg_io, (void *) &f);
   if (res != 0) {
     perror("Message i/o thread creation failed");
     exit(EXIT_FAILURE);

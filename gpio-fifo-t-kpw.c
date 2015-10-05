@@ -79,11 +79,11 @@ Lindo St. Angel 2015.
 #define CLK_PER		(1000000L) // 1 ms clock period.
 #define HALF_CLK_PER	(500000L) // 0.5 ms half clock period.
 #define SAMPLE_OFFSET   (120000L) // 0.12 ms sample offset from clk edge
-#define HOLD_DATA	(450000L) // 0.45 ms data hold time from clk edge
+#define HOLD_DATA	(520000L) // 0.52 ms data hold time from clk edge
 #define CLK_BLANK	(5000000L) // 5 ms min clock blank.
-#define NEW_WORD_VALID	(1100000L) // if a bit comes < than 1.1 ms, declare start of new word.
+#define NEW_WORD_VALID	(2500000L) // if a bit arrives > 2.5 ms after last one, declare start of new word.
 #define MAX_BITS	(64) // max 64-bit word read from panel
-#define MAX_DATA 	(1*1024) // 1 KB data buffer of 58-bit data words - ~70 seconds @ 1 kHz.
+#define MAX_DATA 	(1*1024) // 1 KB data buffer of 64-bit data words - ~66 seconds @ 1 kHz.
 
 // globals for fifo protection
 static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -343,6 +343,20 @@ static int decode(char * word, char * msg) {
     if (zones & 64) strcat(msg, "15 ");
     if (zones & 128) strcat(msg, "16 ");
   }
+  else if (cmd == 0x0a)
+    strcpy(msg, "p->k panel in program mode");
+  else if (cmd == 0x63)
+    strcpy(msg, "p->k undefined command");
+  else if (cmd == 0x64)
+    strcpy(msg, "p->k undefined command");
+  else if (cmd == 0x69)
+    strcpy(msg, "p->k undefined command");
+  else if (cmd == 0x5d)
+    strcpy(msg, "p->k undefined command");
+  else if (cmd == 0x39)
+    strcpy(msg, "p->k Keypad query");
+  else if (cmd == 0x11)
+    strcpy(msg, "p->k Keypad query");
   else if (cmd == 0xff) {
     strcpy(msg, "k->p ");
     if (getBinaryData(word,8,8) == 0xc2)
@@ -410,12 +424,12 @@ static void * panel_io(void * f) {
   char word[MAX_BITS] = "", wordk[MAX_BITS] = "";
   int flag = 0, bit_cnt = 0;
   struct timespec t, tmark;
-  struct fifos * fx;
-  struct fifo fifoa, fifob;
+  //struct fifos * fx;
+  //struct fifo fifoa, fifob;
 
-  fx = (struct fifos *) f;
+  /*fx = (struct fifos *) f;
   fifoa = fx->fifo1; // data from panel to keypad
-  fifob = fx->fifo2; // data from keypad to panel
+  fifob = fx->fifo2; // data from keypad to panel */
 
 //printf("size1: %i size2: %i\n", fifoa.size, fifob.size);
 
@@ -451,9 +465,9 @@ static void * panel_io(void * f) {
       flag = 1; // set flag to indicate clock was high
 //printf("bit_cnt %i\n", bit_cnt);
       // write keypad data bit to panel once every time clock is high
-      if (wordk[bit_cnt] == '1') // invert
+      if (wordk[bit_cnt] == '0') // invert
         GPIO_SET = 1<<PI_DATA_OUT; // set GPIO
-      else if (wordk[bit_cnt] == '0') // invert
+      else if (wordk[bit_cnt] == '1') // invert
         GPIO_CLR = 1<<PI_DATA_OUT; // clear GPIO
       else {
         GPIO_CLR = 1<<PI_DATA_OUT; // clear GPIO
@@ -471,6 +485,7 @@ static void * panel_io(void * f) {
       tnorm(&t);
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait SAMPLE_OFFSET for valid data
       word[bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1'; // invert
+      if (bit_cnt >= MAX_BITS) bit_cnt = (MAX_BITS - 1); // never let bit_cnt exceed MAX_BITS
     }
   }
   pthread_exit("panel io thread finished");
@@ -483,24 +498,34 @@ static void * msg_io(void * f) {
   int data4 = 0, data5 = 0, data6 = 0, data7 = 0;
   char msg[50] = "", oldMsg[50] = "";
   char word[MAX_BITS] = "", wordk[MAX_BITS] = "";
-  struct fifos * fx;
-  struct fifo fifoa, fifob;
+  //struct fifos * fx;
+  //struct fifo fifoa, fifob;
 
-  // enter into prog mode: 0xff 0xd4 0x7f 0xff 0xff 0xe0 0x00 0x00
-  //const char * enter_prog = "1111111111010100011111111111111111111111111000000000000000000000";
-  const char * enter_prog = "0101010101010101010101010101010101010101010101010101010101010101";
-  // exit prog mode:       0xff 0xd6 0xff 0xff 0xff 0xe0 0x00 0x00
-  //const char * exit_prog  = "1111111111010110011111111111111111111111111000000000000000000000";
-  const char * exit_prog  = "1010101010101010101010101010101010101010101010101010101010101010";
+  // enter into prog mode: 0xff 0x94 0x7f 0xff 0xff 0xff 0xff 0xff
+  const char * enter_prog = "1111111110010100011111111111111111111111111111111111111111111111";
+  //const char * enter_prog = "1111111111111111111111111111111111111111111111111111111111111111";
+  //const char * enter_prog = "0101010101010101010101010101010101010101010101010101010101010101";
+  // exit prog mode: 0xff 0x96 0xff 0xff 0xff 0xff 0xff 0xff
+  const char * exit_prog  = "1111111110010110111111111111111111111111111111111111111111111111";
+  //const char * exit_prog  = "1111111111111111111111111111111111111111111111111111111111111111";
+  //const char * exit_prog  = "1010101010101010101010101010101010101010101010101010101010101010";
   // idle:                 0xff 0xff 0xff 0xff 0xff 0xff 0xff 0xff
-  const char * idle       = "1111111111111111111111111111111111111111111111111111111111111111";
+  const char * idle = "1111111111111111111111111111111111111111111111111111111111111111";
+  // 0 button press: 0xff 0x80 0x7f 0xff 0xff 0xff 0xff 0xff
+  const char * zero = "1111111110000000011111111111111111111111111111111111111111111111";
+  // 1 button press: 0xff 0x82 0xff 0xff 0xff 0xff 0xff 0xff
+  const char * one = "1111111110000010111111111111111111111111111111111111111111111111";
+  // 2 button press: 0xff 0x85 0x7f 0xff 0xff 0xff 0xff 0xff
+  const char * two = "1111111110000101011111111111111111111111111111111111111111111111";
+  // 6 button press: 0xff 0x8d 0xff 0xff 0xff 0xff 0xff 0xff
+  const char * six = "1111111110001101111111111111111111111111111111111111111111111111";
 
   memset(&wordk[0], 0, sizeof(wordk));
   strncpy(wordk, idle, MAX_BITS);
 
-  fx = (struct fifos *) f;
+  /*fx = (struct fifos *) f;
   fifoa = fx->fifo1; // data from panel to keypad
-  fifob = fx->fifo2; // data from keypad to panel
+  fifob = fx->fifo2; // data from keypad to panel*/
 
 //printf("size1: %i size2: %i\n", fifoa.size, fifob.size);
 
@@ -532,11 +557,13 @@ static void * msg_io(void * f) {
           strcpy(oldMsg, msg);
         }
         avail--;
-        if (i == 0)	  strncpy(wordk, enter_prog, MAX_BITS);
-        else if (i == 2)  strncpy(wordk, exit_prog, MAX_BITS);
-        else		  strncpy(wordk, idle, MAX_BITS);
-        if (i < 4) i++;
-        else i = 0;
+        // get new keypad data for next time - for now just a test
+        if (i == 125)	   strncpy(wordk, one, MAX_BITS);
+        else if (i == 150) strncpy(wordk, two, MAX_BITS);
+        else if (i == 175) strncpy(wordk, six, MAX_BITS);
+        else if (i == 200) strncpy(wordk, one, MAX_BITS);
+        else		   strncpy(wordk, idle, MAX_BITS);
+        if (i < 300) i++; else i = 0;
         if (pthread_mutex_unlock(&mtx) != 0) {
           perror("msg_io: can't unlock mutex\n");
           exit(-1);

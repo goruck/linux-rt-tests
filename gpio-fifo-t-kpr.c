@@ -79,6 +79,7 @@ Lindo St. Angel 2015.
 #define CLK_PER		(1000000L) // 1 ms clock period.
 #define HALF_CLK_PER	(500000L) // 0.5 ms half clock period.
 #define SAMPLE_OFFSET   (120000L) // 0.12 ms sample offset from clk edge
+#define KSAMPLE_OFFSET	(300000L) // 0.30 ms sample offset from clk edge
 #define CLK_BLANK	(5000000L) // 5 ms min clock blank.
 #define NEW_WORD_VALID	(1100000L) // if a bit comes < than 1.1 ms, declare start of new word.
 #define MAX_BITS	(64) // max 64-bit word read from panel
@@ -338,8 +339,10 @@ static int decode(char * word, char * msg) {
   }
   else if (cmd == 0xff) {
     strcpy(msg, "k->p ");
-    if (getBinaryData(word,8,8) == 0xc2)
-      strcat(msg, "arm/disarm.");
+    if (getBinaryData(word,8,16) == 0x947f)
+      strcat(msg, "Enter prog mode");
+    else if (getBinaryData(word,8,8) == 0x96)
+      strcat(msg, "Exit prog mode");
     else
       strcat(msg, "null or unknown msg.");
   }
@@ -364,9 +367,9 @@ static void * panel_io(void * f) {
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
     if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) && (flag == 0)) {
       flag = 1;
-      t.tv_nsec += SAMPLE_OFFSET;
+      t.tv_nsec += KSAMPLE_OFFSET;
       tnorm(&t);
-      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait SAMPLE_OFFSET for valid data
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait KSAMPLE_OFFSET for valid data
       wordk_temp = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1';
     }
     else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) {
@@ -397,6 +400,7 @@ static void * panel_io(void * f) {
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait SAMPLE_OFFSET for valid data
       wordk[bit_cnt] = wordk_temp;
       word[bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1';
+      if (bit_cnt >= MAX_BITS) bit_cnt = (MAX_BITS - 1); // never let bit_cnt exceed MAX_BITS
     }
   }
   pthread_exit("panel io thread finished");

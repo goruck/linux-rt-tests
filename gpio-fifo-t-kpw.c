@@ -78,8 +78,8 @@ Lindo St. Angel 2015.
 #define INTERVAL        (10*1000) // 10 us timeslice.
 #define CLK_PER		(1000000L) // 1 ms clock period.
 #define HALF_CLK_PER	(500000L) // 0.5 ms half clock period.
-#define SAMPLE_OFFSET   (120000L) // 0.12 ms sample offset from clk edge
-#define HOLD_DATA	(520000L) // 0.52 ms data hold time from clk edge
+#define SAMPLE_OFFSET   (120000L) // 0.12 ms sample offset from clk edge for panel read
+#define HOLD_DATA	(540000L) // 0.54 ms data hold time from clk edge for keypad write
 #define CLK_BLANK	(5000000L) // 5 ms min clock blank.
 #define NEW_WORD_VALID	(2500000L) // if a bit arrives > 2.5 ms after last one, declare start of new word.
 #define MAX_BITS	(64) // max 64-bit word read from panel
@@ -263,7 +263,7 @@ static int fifo_write(struct fifo *f, const char *buf, int nbytes){
 
 // Decode bits from panel into commands and messages.
 static int decode(char * word, char * msg) {
-  int cmd = 0, zones = 0;
+  int cmd = 0, zones = 0, button = 0;
   char year3[2],year4[2],month[2],day[2],hour[2],minute[2];
 
   cmd = getBinaryData(word,0,8);
@@ -358,9 +358,31 @@ static int decode(char * word, char * msg) {
   else if (cmd == 0x11)
     strcpy(msg, "p->k Keypad query");
   else if (cmd == 0xff) {
-    strcpy(msg, "k->p ");
-    if (getBinaryData(word,8,8) == 0xc2)
-      strcat(msg, "arm/disarm.");
+    button = getBinaryData(word,8,20);
+    if (button == 0x947ff)
+      strcat(msg, "button * pressed");
+    else if (button == 0x96fff)
+      strcat(msg, "button # pressed");
+    else if (button == 0x807ff)
+      strcat(msg, "button 0 pressed");
+    else if (button == 0x82fff)
+      strcat(msg, "button 1 pressed");
+    else if (button == 0x857ff)
+      strcat(msg, "button 2 pressed");
+    else if (button == 0x87fff)
+      strcat(msg, "button 3 pressed");
+    else if (button == 0x88fff)
+      strcat(msg, "button 4 pressed");
+    else if (button == 0x8b7ff)
+      strcat(msg, "button 5 pressed");
+    else if (button == 0x8dfff)
+      strcat(msg, "button 6 pressed");
+    else if (button == 0x8efff)
+      strcat(msg, "button 7 pressed");
+    else if (button == 0x917ff)
+      strcat(msg, "button 8 pressed");
+    else if (button == 0x93fff)
+      strcat(msg, "button 9 pressed");
     else
       strcat(msg, "null or unknown msg.");
   }
@@ -422,8 +444,9 @@ static int hex2bin(char * hex, char * bin) {
 // panel io thread
 static void * panel_io(void * f) {
   char word[MAX_BITS] = "", wordk[MAX_BITS] = "";
-  int flag = 0, bit_cnt = 0;
+  int flag = 0, bit_cnt = 0, cmd = 0;
   struct timespec t, tmark;
+  const char * idle = "1111111111111111111111111111111111111111111111111111111111111111";
   //struct fifos * fx;
   //struct fifo fifoa, fifob;
 
@@ -441,7 +464,7 @@ static void * panel_io(void * f) {
     t.tv_nsec += INTERVAL;
     tnorm(&t);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
-    if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) && (flag == 0)) {
+    if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) && (flag == 0)) { // write keypad data
       if (ts_diff(&t, &tmark) > NEW_WORD_VALID) { // check for new word
         fifo_write(&(((struct fifos *) f)->fifo1), word, MAX_BITS); // write current panel word to FIFO
         if (pthread_mutex_lock(&mtx) != 0) { // avail global protection mutex
@@ -457,7 +480,13 @@ static void * panel_io(void * f) {
           perror("panel_io: signal failed\n");
           exit(-1);
         }
-        fifo_read(&(((struct fifos *) f)->fifo2), wordk, MAX_BITS); // get a keypad command to send to panel
+        cmd = getBinaryData(word,0,8);
+        if ((cmd == 0x11) || (cmd == 0x39)) {
+//printf("just avoided contention\n"); // reduce HOLD_DATA to 0.52 ms if uncommented
+          strncpy(wordk, idle, MAX_BITS); // avoid contention with a keypad responding to panel query
+        }
+        else
+          fifo_read(&(((struct fifos *) f)->fifo2), wordk, MAX_BITS); // get a keypad command to send to panel
         bit_cnt = 0; // reset bit counter
         memset(&word[0], 0, sizeof(word)); // clear panel word array
       }
@@ -479,7 +508,7 @@ static void * panel_io(void * f) {
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait HOLD_DATA time
       GPIO_CLR = 1<<PI_DATA_OUT; // leave with GPIO cleared
     }
-    else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) {
+    else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) { // read panel data
       flag = 0;
       t.tv_nsec += SAMPLE_OFFSET;
       tnorm(&t);

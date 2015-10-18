@@ -78,12 +78,12 @@ Lindo St. Angel 2015.
 #define INTERVAL        (10*1000) // 10 us timeslice.
 #define CLK_PER		(1000000L) // 1 ms clock period.
 #define HALF_CLK_PER	(500000L) // 0.5 ms half clock period.
-#define SAMPLE_OFFSET   (120000L) // 0.12 ms sample offset from clk edge
-#define KSAMPLE_OFFSET	(300000L) // 0.30 ms sample offset from clk edge
+#define SAMPLE_OFFSET   (120000L) // 0.12 ms sample offset from clk edge for panel read
+#define KSAMPLE_OFFSET	(300000L) // 0.30 ms sample offset from clk edge for keypad read
 #define CLK_BLANK	(5000000L) // 5 ms min clock blank.
 #define NEW_WORD_VALID	(1100000L) // if a bit comes < than 1.1 ms, declare start of new word.
 #define MAX_BITS	(64) // max 64-bit word read from panel
-#define MAX_DATA 	(1*1024) // 1 KB data buffer of 58-bit data words - ~70 seconds @ 1 kHz.
+#define MAX_DATA 	(1*1024) // 1 KB data buffer of 64-bit data words - ~66 seconds @ 1 kHz.
 
 // globals for fifo protection
 static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -257,7 +257,7 @@ static int fifo_write(struct fifo *f, const char *buf, int nbytes){
 
 // Decode bits from panel into commands and messages.
 static int decode(char * word, char * msg) {
-  int cmd = 0, zones = 0;
+  int cmd = 0, zones = 0, button = 0;
   char year3[2],year4[2],month[2],day[2],hour[2],minute[2];
 
   cmd = getBinaryData(word,0,8);
@@ -337,12 +337,47 @@ static int decode(char * word, char * msg) {
     if (zones & 64) strcat(msg, "15 ");
     if (zones & 128) strcat(msg, "16 ");
   }
+  else if (cmd == 0x0a)
+    strcpy(msg, "p->k panel in program mode");
+  else if (cmd == 0x63)
+    strcpy(msg, "p->k undefined command");
+  else if (cmd == 0x64)
+    strcpy(msg, "p->k undefined command");
+  else if (cmd == 0x69)
+    strcpy(msg, "p->k undefined command");
+  else if (cmd == 0x5d)
+    strcpy(msg, "p->k undefined command");
+  else if (cmd == 0x39)
+    strcpy(msg, "p->k Keypad query");
+  else if (cmd == 0x11)
+    strcpy(msg, "p->k Keypad query");
   else if (cmd == 0xff) {
     strcpy(msg, "k->p ");
-    if (getBinaryData(word,8,16) == 0x947f)
-      strcat(msg, "Enter prog mode");
-    else if (getBinaryData(word,8,8) == 0x96)
-      strcat(msg, "Exit prog mode");
+    button = getBinaryData(word,8,20); //bits 11~14 data; 15~16 CRC
+    if (button == 0x947ff)
+      strcat(msg, "button * pressed");
+    else if (button == 0x96fff)
+      strcat(msg, "button # pressed");
+    else if (button == 0x807ff)
+      strcat(msg, "button 0 pressed");
+    else if (button == 0x82fff)
+      strcat(msg, "button 1 pressed");
+    else if (button == 0x857ff)
+      strcat(msg, "button 2 pressed");
+    else if (button == 0x87fff)
+      strcat(msg, "button 3 pressed");
+    else if (button == 0x88fff)
+      strcat(msg, "button 4 pressed");
+    else if (button == 0x8b7ff)
+      strcat(msg, "button 5 pressed");
+    else if (button == 0x8dfff)
+      strcat(msg, "button 6 pressed");
+    else if (button == 0x8e7ff)
+      strcat(msg, "button 7 pressed");
+    else if (button == 0x917ff)
+      strcat(msg, "button 8 pressed");
+    else if (button == 0x93fff)
+      strcat(msg, "button 9 pressed");
     else
       strcat(msg, "null or unknown msg.");
   }
@@ -365,17 +400,17 @@ static void * panel_io(void * f) {
     t.tv_nsec += INTERVAL;
     tnorm(&t);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
-    if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) && (flag == 0)) {
+    if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) && (flag == 0)) { // read keypad data
       flag = 1;
       t.tv_nsec += KSAMPLE_OFFSET;
       tnorm(&t);
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait KSAMPLE_OFFSET for valid data
-      wordk_temp = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1';
+      wordk_temp = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1'; // invert
     }
-    else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) {
+    else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) { // read panel data
       if (ts_diff(&t, &tmark) > NEW_WORD_VALID) { // check for new word
-        fifo_write((struct fifo *) f, wordk, MAX_BITS); // write current keypad word to FIFO
         fifo_write((struct fifo *) f, word, MAX_BITS); // write current panel word to FIFO
+        fifo_write((struct fifo *) f, wordk, MAX_BITS); // write current keypad word to FIFO
         if (pthread_mutex_lock(&mtx) != 0) {
           perror("panel_io: can't lock mutex\n");
           exit(-1);
@@ -399,7 +434,7 @@ static void * panel_io(void * f) {
       tnorm(&t);
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait SAMPLE_OFFSET for valid data
       wordk[bit_cnt] = wordk_temp;
-      word[bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1';
+      word[bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1'; // invert
       if (bit_cnt >= MAX_BITS) bit_cnt = (MAX_BITS - 1); // never let bit_cnt exceed MAX_BITS
     }
   }

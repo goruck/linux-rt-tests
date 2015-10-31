@@ -357,34 +357,39 @@ static int decode(char * word, char * msg) {
     strcpy(msg, "p->k Keypad query");
   else if (cmd == 0x11)
     strcpy(msg, "p->k Keypad query");
-  else if (cmd == 0xff) {
-    button = getBinaryData(word,8,20);
-    if (button == 0x947ff)
-      strcat(msg, "button * pressed");
-    else if (button == 0x96fff)
-      strcat(msg, "button # pressed");
-    else if (button == 0x807ff)
-      strcat(msg, "button 0 pressed");
-    else if (button == 0x82fff)
-      strcat(msg, "button 1 pressed");
-    else if (button == 0x857ff)
-      strcat(msg, "button 2 pressed");
-    else if (button == 0x87fff)
-      strcat(msg, "button 3 pressed");
-    else if (button == 0x88fff)
-      strcat(msg, "button 4 pressed");
-    else if (button == 0x8b7ff)
-      strcat(msg, "button 5 pressed");
-    else if (button == 0x8dfff)
-      strcat(msg, "button 6 pressed");
-    else if (button == 0x8efff)
-      strcat(msg, "button 7 pressed");
-    else if (button == 0x917ff)
-      strcat(msg, "button 8 pressed");
-    else if (button == 0x93fff)
-      strcat(msg, "button 9 pressed");
-    else
-      strcat(msg, "null or unknown msg.");
+  else if (cmd == 0xff) { // keypad to panel data
+    strcpy(msg, "k->p ");
+    if (getBinaryData(word,8,32) == 0xffffffff)
+      strcat(msg, "idle");
+    else {
+      button = getBinaryData(word,8,20); //bits 11~14 data; 15~16 CRC
+      if (button == 0x947ff)
+        strcat(msg, "button * pressed");
+      else if (button == 0x96fff)
+        strcat(msg, "button # pressed");
+      else if (button == 0x807ff)
+        strcat(msg, "button 0 pressed");
+      else if (button == 0x82fff)
+        strcat(msg, "button 1 pressed");
+      else if (button == 0x857ff)
+        strcat(msg, "button 2 pressed");
+      else if (button == 0x87fff)
+        strcat(msg, "button 3 pressed");
+      else if (button == 0x88fff)
+        strcat(msg, "button 4 pressed");
+      else if (button == 0x8b7ff)
+        strcat(msg, "button 5 pressed");
+      else if (button == 0x8dfff)
+        strcat(msg, "button 6 pressed");
+      else if (button == 0x8e7ff)
+        strcat(msg, "button 7 pressed");
+      else if (button == 0x917ff)
+        strcat(msg, "button 8 pressed");
+      else if (button == 0x93fff)
+        strcat(msg, "button 9 pressed");
+      else
+        strcat(msg, "unknown keypad msg");
+    }
   }
   else
     strcpy(msg, "p->k unknown command.");
@@ -525,8 +530,10 @@ static void * msg_io(void * f) {
   int cmd = 0, i = 0;
   int data0 = 0, data1 = 0, data2 = 0, data3 = 0;
   int data4 = 0, data5 = 0, data6 = 0, data7 = 0;
-  char msg[50] = "", oldMsg[50] = "";
+  char msg[50] = "", oldPKMsg[50] = "", oldKPMsg[50] = "";
   char word[MAX_BITS] = "", wordk[MAX_BITS] = "";
+  long unsigned index = 0;
+
   //struct fifos * fx;
   //struct fifo fifoa, fifob;
 
@@ -576,14 +583,17 @@ static void * msg_io(void * f) {
         data2 = getBinaryData(word,16,8); data3 = getBinaryData(word,24,8);
         data4 = getBinaryData(word,32,8); data5 = getBinaryData(word,40,8);
         data6 = getBinaryData(word,48,8); data7 = getBinaryData(word,56,8);
-        if (strcmp(msg, oldMsg) != 0) {
-          printf ("cmd:0x%02x,%-50s", cmd, msg);
-          printf (" ***data-all: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",data0,data1,data2,data3,data4,data5,data6,data7);
+        if ((cmd == 0xff && strcmp(msg, oldKPMsg) != 0) || (cmd != 0xff && strcmp(msg, oldPKMsg) != 0)) { // only output changes
+          printf ("index:%lu,%-50s", index++, msg);
+          printf (" data: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",data0,data1,data2,data3,data4,data5,data6,data7);
           //fprintf (out_file, "cmd:0x%02x,%-25s\n", cmd, msg);
           //fprintf (out_file, "***data-all: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",data0,data1,data2,data3,data4,data5,data6);
           //fflush(out_file);
           fflush(stdout); // won't printf results w/o a flush while in the loop
-          strcpy(oldMsg, msg);
+          if (cmd == 0xff)
+            strcpy(oldKPMsg, msg);
+          else
+            strcpy(oldPKMsg, msg);
         }
         avail--;
         // get new keypad data for next time - for now just a test
@@ -593,10 +603,10 @@ static void * msg_io(void * f) {
         else if (i == 200) strncpy(wordk, one, MAX_BITS);
         else		   strncpy(wordk, idle, MAX_BITS);
         if (i < 300) i++; else i = 0;
-        if (pthread_mutex_unlock(&mtx) != 0) {
-          perror("msg_io: can't unlock mutex\n");
-          exit(-1);
-        }
+      }
+      if (pthread_mutex_unlock(&mtx) != 0) {
+        perror("msg_io: can't unlock mutex\n");
+        exit(-1);
       }
     }
 

@@ -18,18 +18,13 @@ Lindo St. Angel 2015.
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
-#include <poll.h>
 #include <stdint.h>
-#include <unistd.h>
-
 #include <sched.h>
 #include <string.h>
 #include <time.h>
 #include <sys/mman.h>
-
 #include <pthread.h>
-
-#include <semaphore.h>
+#include <sys/utsname.h>
 
 // GPIO Access from ARM Running Linux. Based on Dom and Gert rev 15-feb-13
 #define BCM2708_PERI_BASE	0x3F000000 /* modified for Pi 2 */
@@ -154,8 +149,8 @@ static void setup_io(void) {
   close(mem_fd); //No need to keep mem_fd open after mmap
 
   if (gpio_map == MAP_FAILED) {
-    printf("mmap error %d\n", (int)gpio_map);//errno also set!
-    exit(-1);
+    fprintf(stderr, "mmap error %d\n", (int) gpio_map); //errno also set!
+    exit(EXIT_FAILURE);
   }
 
   // Always use volatile pointer!
@@ -210,7 +205,7 @@ static inline long ts_diff(struct timespec *a, struct timespec *b)
   return (x - y);
 }
 
-static unsigned int getBinaryData(char *st, int offset, int length)
+static inline unsigned int getBinaryData(char *st, int offset, int length)
 {
   unsigned int buf = 0, j;
 
@@ -224,7 +219,7 @@ static unsigned int getBinaryData(char *st, int offset, int length)
 }
 
 // fifo1 - stores panel to keypad and keypad to panel data
-static int pushElement1(char *element) {
+static inline int pushElement1(char *element) {
   int nextElement;
   
   nextElement = (m_Write1 + 1) % FIFO_SIZE;
@@ -238,7 +233,7 @@ static int pushElement1(char *element) {
     return 0; // fifo is full
 }
 
-static int popElement1(char *element) {
+static inline int popElement1(char *element) {
   int nextElement;
 
   if (m_Read1 == m_Write1)
@@ -251,7 +246,7 @@ static int popElement1(char *element) {
 }
 
 // fifo2 - stores keypad data to be sent to panel
-static int pushElement2(char *element) {
+static inline int pushElement2(char *element) {
   int nextElement;
   
   nextElement = (m_Write2 + 1) % FIFO_SIZE;
@@ -265,7 +260,7 @@ static int pushElement2(char *element) {
     return 0; // fifo is full
 }
 
-static int popElement2(char *element) {
+static inline int popElement2(char *element) {
   int nextElement;
 
   if (m_Read2 == m_Write2)
@@ -418,7 +413,7 @@ static int decode(char * word, char * msg) {
 // panel io thread
 static void * panel_io(void *arg) {
   char word[MAX_BITS] = "", wordkw[MAX_BITS], wordkr[MAX_BITS] ="", wordkr_temp = '0';
-  int flag = 0, bit_cnt = 0, i = 0, res = 0;
+  int flag = 0, bit_cnt = 0, i, res;
   struct timespec t, tmark;
 
   strncpy(wordkw, IDLE, MAX_BITS);
@@ -433,14 +428,14 @@ static void * panel_io(void *arg) {
         for (i = 0; i < MAX_BITS; i++) {
           res = pushElement1(&word[i]); // store p->k data
           if (res == 0) {
-            printf("panel_io: fifo write error\n");
+            fprintf(stderr, "panel_io: fifo write error\n");
             exit(EXIT_FAILURE);
           }
         }
         for (i = 0; i < MAX_BITS; i++) {
           res = pushElement1(&wordkr[i]); // store k->p data
           if (res == 0) {
-            printf("panel_io: fifo write error\n");
+            fprintf(stderr, "panel_io: fifo write error\n");
             exit(EXIT_FAILURE);
           }
         }
@@ -470,7 +465,7 @@ static void * panel_io(void *arg) {
         GPIO_CLR = 1<<PI_DATA_OUT; // clear GPIO
       else {
         GPIO_CLR = 1<<PI_DATA_OUT; // clear GPIO
-        printf ("panel_io: bad element in keypad data array wordk\n");
+        fprintf(stderr, "panel_io: bad element in keypad data array wordk\n");
         //exit(EXIT_FAILURE);
       }
       t.tv_nsec += KSAMPLE_OFFSET;
@@ -497,9 +492,9 @@ static void * panel_io(void *arg) {
 
 // message i/o thread
 static void * msg_io(void *arg) {
-  int cmd = 0, i = 0, j = 0, res = 0;
-  int data0 = 0, data1 = 0, data2 = 0, data3 = 0;
-  int data4 = 0, data5 = 0, data6 = 0, data7 = 0;
+  int cmd, i, j = 0, res;
+  int data0, data1, data2, data3;
+  int data4, data5, data6, data7;
   char msg[50] = "", oldPKMsg[50] = "", oldKPMsg[50] = "";
   char word[MAX_BITS] = "", wordk[MAX_BITS] = "";
   long unsigned index = 0;
@@ -529,11 +524,11 @@ static void * msg_io(void *arg) {
     }
     // get new keypad data - for now just a test
     if (j == 400) {
-      strncpy(wordk, STAR, MAX_BITS);
+      strncpy(wordk, IDLE, MAX_BITS);
       for (i = 0; i < MAX_BITS; i++) {
         res = pushElement2(&wordk[i]); // send keypad data to panel
         if (res == 0) {
-          printf("msg_io: fifo write error\n");
+          fprintf(stderr, "msg_io: fifo write error\n");
           exit(EXIT_FAILURE);
         }
       }
@@ -543,17 +538,17 @@ static void * msg_io(void *arg) {
       for (i = 0; i < MAX_BITS; i++) {
         res = pushElement2(&wordk[i]); // send keypad data to panel
         if (res == 0) {
-          printf("msg_io: fifo write error\n");
+          fprintf(stderr, "msg_io: fifo write error\n");
           exit(EXIT_FAILURE);
         }
       }
     }
     else if (j == 1200) {
-      strncpy(wordk, POUND, MAX_BITS);
+      strncpy(wordk, IDLE, MAX_BITS);
       for (i = 0; i < MAX_BITS; i++) {
         res = pushElement2(&wordk[i]); // send keypad data to panel
         if (res == 0) {
-          printf("msg_io: fifo write error\n");
+          fprintf(stderr, "msg_io: fifo write error\n");
           exit(EXIT_FAILURE);
         }
       }
@@ -563,7 +558,7 @@ static void * msg_io(void *arg) {
       for (i = 0; i < MAX_BITS; i++) {
         res = pushElement2(&wordk[i]); // send keypad data to panel
         if (res == 0) {
-          printf("msg_io: fifo write error\n");
+          fprintf(stderr, "msg_io: fifo write error\n");
           exit(EXIT_FAILURE);
         }
       }
@@ -575,12 +570,27 @@ static void * msg_io(void *arg) {
 
 int main(int argc, char *argv[])
 {
-  int res = 0, i = 0;
+  int res, i, crit1, crit2, flag;
   struct sched_param param_main, param_pio;
+  struct utsname u;
   pthread_t pio_thread, mio_thread;
   pthread_attr_t my_attr;
   void *thread_result;
   cpu_set_t cpuset_mio, cpuset_pio;
+  FILE *fd;
+
+  // Check if running with real-time linux.
+  uname(&u);
+  crit1 = (int) strcasestr (u.version, "PREEMPT RT");
+  if ((fd = fopen("/sys/kernel/realtime","r")) != NULL) {
+    crit2 = ((fscanf(fd, "%d", &flag) == 1) && (flag == 1));
+    fclose(fd);
+  }
+  fprintf(stderr, "This is a %s kernel.\n", (crit1 && crit2)  ? "PREEMPT RT" : "vanilla");
+  if (!(crit1 && crit2)) {
+    fprintf(stderr, "Can't run under a vanilla kernel\n");
+    exit(EXIT_FAILURE);
+  }
 
   // CPU(s) for message i/o thread
   CPU_ZERO(&cpuset_mio);
@@ -594,13 +604,13 @@ int main(int argc, char *argv[])
   /* Declare ourself as a real time task */
   param_main.sched_priority = MAIN_PRI;
   if(sched_setscheduler(0, SCHED_FIFO, &param_main) == -1) {
-    perror("sched_setscheduler failed");
+    perror("sched_setscheduler failed\n");
     exit(EXIT_FAILURE);
   }
 
   /* Lock memory to prevent page faults */
   if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1) {
-    perror("mlockall failed");
+    perror("mlockall failed\n");
     exit(EXIT_FAILURE);
   }
 
@@ -635,9 +645,9 @@ int main(int argc, char *argv[])
   pthread_attr_setschedpolicy(&my_attr, SCHED_FIFO);
   param_pio.sched_priority = PANEL_IO_PRI;
   pthread_attr_setschedparam(&my_attr, &param_pio);
-  res = pthread_create(&pio_thread, &my_attr, panel_io, (void *) "pio");
+  res = pthread_create(&pio_thread, &my_attr, panel_io, NULL);
   if (res != 0) {
-    perror("Panel i/o thread creation failed");
+    perror("Panel i/o thread creation failed\n");
     exit(EXIT_FAILURE);
   }
   pthread_attr_destroy(&my_attr);
@@ -648,9 +658,9 @@ int main(int argc, char *argv[])
   pthread_attr_setschedpolicy(&my_attr, SCHED_FIFO);
   param_pio.sched_priority = MSG_IO_PRI;
   pthread_attr_setschedparam(&my_attr, &param_pio);
-  res = pthread_create(&mio_thread, &my_attr, msg_io, (void *) "mio");
+  res = pthread_create(&mio_thread, &my_attr, msg_io, NULL);
   if (res != 0) {
-    perror("Message i/o thread creation failed");
+    perror("Message i/o thread creation failed\n");
     exit(EXIT_FAILURE);
   }
   pthread_attr_destroy(&my_attr);
@@ -658,18 +668,18 @@ int main(int argc, char *argv[])
   //wait for threads to finish
   res = pthread_join(pio_thread, &thread_result);
   if (res != 0) {
-    perror("Panel i/o thread join failed");
+    perror("Panel i/o thread join failed\n");
     exit(EXIT_FAILURE);
   }
   res = pthread_join(mio_thread, &thread_result);
   if (res != 0) {
-    perror("Message i/o thread join failed");
+    perror("Message i/o thread join failed\n");
     exit(EXIT_FAILURE);
   }
 
   /* Unlock memory */
   if(munlockall() == -1) {
-    perror("munlockall failed");
+    perror("munlockall failed\n");
     exit(EXIT_FAILURE);
   }
 

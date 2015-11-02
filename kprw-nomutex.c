@@ -229,8 +229,10 @@ static inline int pushElement1(char *element) {
     m_Write1 = nextElement;
     return 1;
   }
-  else
-    return 0; // fifo is full
+  else { // fifo was full and data was overwritten
+    m_Write1 = nextElement;
+    return 0;
+  }
 }
 
 static inline int popElement1(char *element) {
@@ -429,14 +431,16 @@ static void * panel_io(void *arg) {
           res = pushElement1(&word[i]); // store p->k data
           if (res == 0) {
             fprintf(stderr, "panel_io: fifo write error\n");
-            exit(EXIT_FAILURE);
+            break;
+            //exit(EXIT_FAILURE);
           }
         }
         for (i = 0; i < MAX_BITS; i++) {
           res = pushElement1(&wordkr[i]); // store k->p data
           if (res == 0) {
             fprintf(stderr, "panel_io: fifo write error\n");
-            exit(EXIT_FAILURE);
+            break;
+            //exit(EXIT_FAILURE);
           }
         }
         if (getBinaryData(word,0,8) == 0x11 || getBinaryData(word,0,16) == 0x0580)

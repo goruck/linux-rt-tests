@@ -708,47 +708,46 @@ int main(int argc, char *argv[])
     write(connfd, ledStatus, strlen(ledStatus));
     close(connfd);
     num = atoi(buffer);
-    printf("read number: %i\n", num);
-    switch (num) {
-      case 0 :
-        strncpy(wordk, ZERO, MAX_BITS);
-        break;
-      case 1 :
-        strncpy(wordk, ONE, MAX_BITS);
-        break;
-      case 2 :
-        strncpy(wordk, TWO, MAX_BITS);
-        break;
-      case 3 :
-        strncpy(wordk, THREE, MAX_BITS);
-        break;
-      case 4 :
-        strncpy(wordk, FOUR, MAX_BITS);
-        break;
-      case 5 :
-        strncpy(wordk, FIVE, MAX_BITS);
-        break;
-      case 6 :
-        strncpy(wordk, SIX, MAX_BITS);
-        break;
-      case 7 :
-        strncpy(wordk, SEVEN, MAX_BITS);
-        break;
-      case 8 :
-        strncpy(wordk, EIGHT, MAX_BITS);
-        break;
-      case 9 :
-        strncpy(wordk, NINE, MAX_BITS);
-        break;
-      case 10 :
-        strncpy(wordk, STAR, MAX_BITS);
-        break;
-      case 11 :
-        strncpy(wordk, POUND, MAX_BITS);
-        break;
-      default :
-        strncpy(wordk, IDLE, MAX_BITS);
-    }
+    printf("buffer: %s, read number: %i\n", buffer, num);
+    if (strncmp(buffer, "star", 4) == 0)
+       strncpy(wordk, STAR, MAX_BITS);
+    else if (strncmp(buffer, "pound", 5) == 0)
+       strncpy(wordk, POUND, MAX_BITS);
+    else if (strncmp(buffer, "0", 1) == 0)
+       strncpy(wordk, ZERO, MAX_BITS);
+    else
+      switch (num) {
+        case 1 :
+          strncpy(wordk, ONE, MAX_BITS);
+          break;
+        case 2 :
+          strncpy(wordk, TWO, MAX_BITS);
+          break;
+        case 3 :
+          strncpy(wordk, THREE, MAX_BITS);
+          break;
+        case 4 :
+          strncpy(wordk, FOUR, MAX_BITS);
+          break;
+        case 5 :
+          strncpy(wordk, FIVE, MAX_BITS);
+          break;
+        case 6 :
+          strncpy(wordk, SIX, MAX_BITS);
+          break;
+        case 7 :
+          strncpy(wordk, SEVEN, MAX_BITS);
+          break;
+        case 8 :
+          strncpy(wordk, EIGHT, MAX_BITS);
+          break;
+        case 9 :
+          strncpy(wordk, NINE, MAX_BITS);
+          break;
+        default :
+          fprintf(stderr, "invalid command\n");
+          strncpy(wordk, IDLE, MAX_BITS);
+      }
     for (i = 0; i < MAX_BITS; i++) {
       res = pushElement2(&wordk[i]); // send keypad data to panel
       if (res == 0) {

@@ -1,8 +1,8 @@
 /*
 
-kprw-momutex.c
+kprw-server.c
 
-compile with "gcc -Wall -o kprw-nomutex kprw-nomutex.c -lrt -lpthread"
+compile with "gcc -Wall -o kprw-server kprw-server.c -lrt -lpthread -lwrap"
 
 must run under linux PREEMPT_RT kernel 3.18.9-rt5-v7
 
@@ -30,6 +30,14 @@ Lindo St. Angel 2015.
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <signal.h>
+#define	PORT_NUM	4746 // port number for server
+#define	BUF_LEN		16 // size of string to hole longest message incl '\n'
+#define BACKLOG		1
+//#define	_BSD_SOURCE // to get definitions of NI_MAXHOST and NI_MAXSERV from <netdb.h>
+#include <netdb.h>
+#define ADDRSTRLEN	(NI_MAXHOST + NI_MAXSERV + 10)
+#include <tcpd.h> //for hosts_ctl()
+
 
 // GPIO Access from ARM Running Linux. Based on Dom and Gert rev 15-feb-13
 #define BCM2708_PERI_BASE	0x3F000000 /* modified for Pi 2 */
@@ -86,7 +94,7 @@ Lindo St. Angel 2015.
 #define MAX_BITS	(64) // max 64-bit word read from panel
 #define MAX_DATA 	(1*1024) // 1 KB data buffer of 64-bit data words - ~66 seconds @ 1 kHz.
 #define FIFO_SIZE	(MAX_BITS*MAX_DATA) // FIFO depth
-#define MSG_IO_UPDATE   (5000000); // 5 ms message io thread update period
+#define MSG_IO_UPDATE   (5000000) // 5 ms message io thread update period
 
 // keypad button bit mappings
 // no button:	0xff 0xff 0xff 0xff 0xff 0xff 0xff 0xff
@@ -115,8 +123,16 @@ Lindo St. Angel 2015.
 #define EIGHT	"1111111110010001011111111111111111111111111111111111111111111111"
 // 9: 		0xff 0x93 0xff 0xff 0xff 0xff 0xff 0xff
 #define NINE	"1111111110010011111111111111111111111111111111111111111111111111"
+// stay:        0xff 0xd7 0xff 0xff 0xff 0xff 0xff 0xff
+#define STAY	"1111111111010111111111111111111111111111111111111111111111111111"
+// away:	0xff 0xd8 0xff 0xff 0xff 0xff 0xff 0xff
+#define AWAY	"1111111111011000111111111111111111111111111111111111111111111111"
 
-char ledStatus[1024] = "";
+char ledStatus[50] = "";
+char zone1Status[50] = "";
+char zone2Status[50] = "";
+char zone3Status[50] = "";
+char zone4Status[50] = "";
 
 // global for direct gpio access
 volatile unsigned *gpio;
@@ -289,13 +305,14 @@ static int decode(char * word, char * msg) {
   cmd = getBinaryData(word,0,8);
   strcpy(msg, "");
   if (cmd == 0x05) {
-    strcpy(msg, "p->k LED Status: ");
+    strcpy(msg, "LED Status ");
     if (getBinaryData(word,12,1)) strcat(msg, "Error ");
-    if (getBinaryData(word,13,1)) strcat(msg, "Bypass ");
-    if (getBinaryData(word,14,1)) strcat(msg, "Memory ");
-    if (getBinaryData(word,15,1)) strcat(msg, "Armed ");
-    if (getBinaryData(word,16,1)) strcat(msg, "Ready ");
-    if (getBinaryData(word,17,1)) strcat(msg, "Program ");
+    else if (getBinaryData(word,13,1)) strcat(msg, "Bypass ");
+    else if (getBinaryData(word,14,1)) strcat(msg, "Memory ");
+    else if (getBinaryData(word,15,1)) strcat(msg, "Armed ");
+    else if (getBinaryData(word,16,1)) strcat(msg, "Ready ");
+    else if (getBinaryData(word,17,1)) strcat(msg, "Program ");
+    else strcat(msg, "Not Ready ");
   }
   else if (cmd == 0xa5) {
     sprintf(year3, "%d", getBinaryData(word,9,4));
@@ -304,7 +321,7 @@ static int decode(char * word, char * msg) {
     sprintf(day, "%d", getBinaryData(word,23,5));
     sprintf(hour, "%d", getBinaryData(word,28,5));
     sprintf(minute, "%d", getBinaryData(word,33,6));
-    strcpy(msg, "p->k Date: 20");
+    strcpy(msg, "Date: 20");
     strcat(msg, year3);
     strcat(msg, year4);
     strcat(msg, "-");
@@ -317,69 +334,75 @@ static int decode(char * word, char * msg) {
     strcat(msg, minute);
   }
   else if (cmd == 0x27) {
-    strcpy(msg, "p->k Zone1: ");
+    strcpy(msg, "Zone1 ");
     zones = getBinaryData(word,41,8);
-    if (zones & 1) strcat(msg, "1 ");
-    if (zones & 2) strcat(msg, "2 ");
-    if (zones & 4) strcat(msg, "3 ");
-    if (zones & 8) strcat(msg, "4 ");
-    if (zones & 16) strcat(msg, "5 ");
-    if (zones & 32) strcat(msg, "6 ");
-    if (zones & 64) strcat(msg, "7 ");
+    if (zones & 1) strcat(msg, "1, ");
+    if (zones & 2) strcat(msg, "2, ");
+    if (zones & 4) strcat(msg, "3, ");
+    if (zones & 8) strcat(msg, "4, ");
+    if (zones & 16) strcat(msg, "5, ");
+    if (zones & 32) strcat(msg, "6, ");
+    if (zones & 64) strcat(msg, "7, ");
     if (zones & 128) strcat(msg, "8 ");
+    if (zones == 0) strcat(msg, "Ready ");
   }
   else if (cmd == 0x2d) {
-    strcpy(msg, "p->k Zone2: ");
+    strcpy(msg, "Zone2 ");
     zones = getBinaryData(word,41,8);
-    if (zones & 1) strcat(msg, "9 ");
-    if (zones & 2) strcat(msg, "10 ");
-    if (zones & 4) strcat(msg, "11 ");
-    if (zones & 8) strcat(msg, "12 ");
-    if (zones & 16) strcat(msg, "13 ");
-    if (zones & 32) strcat(msg, "14 ");
-    if (zones & 64) strcat(msg, "15 ");
+    if (zones & 1) strcat(msg, "9, ");
+    if (zones & 2) strcat(msg, "10, ");
+    if (zones & 4) strcat(msg, "11, ");
+    if (zones & 8) strcat(msg, "12, ");
+    if (zones & 16) strcat(msg, "13, ");
+    if (zones & 32) strcat(msg, "14, ");
+    if (zones & 64) strcat(msg, "15, ");
     if (zones & 128) strcat(msg, "16 ");
+    if (zones == 0) strcat(msg, "Ready ");
   }
   else if (cmd == 0x34) {
-    strcpy(msg, "p->k Zone3: ");
+    strcpy(msg, "Zone3 ");
     zones = getBinaryData(word,41,8);
-    if (zones & 1) strcat(msg, "9 ");
-    if (zones & 2) strcat(msg, "10 ");
-    if (zones & 4) strcat(msg, "11 ");
-    if (zones & 8) strcat(msg, "12 ");
-    if (zones & 16) strcat(msg, "13 ");
-    if (zones & 32) strcat(msg, "14 ");
-    if (zones & 64) strcat(msg, "15 ");
+    if (zones & 1) strcat(msg, "9, ");
+    if (zones & 2) strcat(msg, "10, ");
+    if (zones & 4) strcat(msg, "11, ");
+    if (zones & 8) strcat(msg, "12, ");
+    if (zones & 16) strcat(msg, "13, ");
+    if (zones & 32) strcat(msg, "14, ");
+    if (zones & 64) strcat(msg, "15, ");
     if (zones & 128) strcat(msg, "16 ");
+    if (zones == 0) strcat(msg, "Ready ");
   }
   else if (cmd == 0x3e) {
-    strcpy(msg, "p->k Zone4: ");
+    strcpy(msg, "Zone4 ");
     zones = getBinaryData(word,41,8);
-    if (zones & 1) strcat(msg, "9 ");
-    if (zones & 2) strcat(msg, "10 ");
-    if (zones & 4) strcat(msg, "11 ");
-    if (zones & 8) strcat(msg, "12 ");
-    if (zones & 16) strcat(msg, "13 ");
-    if (zones & 32) strcat(msg, "14 ");
-    if (zones & 64) strcat(msg, "15 ");
+    if (zones & 1) strcat(msg, "9, ");
+    if (zones & 2) strcat(msg, "10, ");
+    if (zones & 4) strcat(msg, "11, ");
+    if (zones & 8) strcat(msg, "12, ");
+    if (zones & 16) strcat(msg, "13, ");
+    if (zones & 32) strcat(msg, "14, ");
+    if (zones & 64) strcat(msg, "15, ");
     if (zones & 128) strcat(msg, "16 ");
+    if (zones == 0) strcat(msg, "Ready ");
   }
   else if (cmd == 0x0a)
-    strcpy(msg, "p->k panel in program mode");
+    strcpy(msg, "Panel Program Mode");
   else if (cmd == 0x63)
-    strcpy(msg, "p->k undefined command");
+    strcpy(msg, "Undefined command from panel");
   else if (cmd == 0x64)
-    strcpy(msg, "p->k undefined command");
+    strcpy(msg, "Undefined command from panel");
   else if (cmd == 0x69)
-    strcpy(msg, "p->k undefined command");
+    strcpy(msg, "Undefined command from panel");
   else if (cmd == 0x5d)
-    strcpy(msg, "p->k undefined command");
+    strcpy(msg, "Undefined command from panel");
   else if (cmd == 0x39)
-    strcpy(msg, "p->k undefined command");
+    strcpy(msg, "Undefined command from panel");
+  else if (cmd == 0xb1)
+    strcpy(msg, "Undefined command from panel");
   else if (cmd == 0x11)
-    strcpy(msg, "p->k Keypad query");
+    strcpy(msg, "Keypad query");
   else if (cmd == 0xff) { // keypad to panel data
-    strcpy(msg, "k->p ");
+    strcpy(msg, "From Keypad ");
     if (getBinaryData(word,8,32) == 0xffffffff)
       strcat(msg, "idle");
     else {
@@ -408,12 +431,16 @@ static int decode(char * word, char * msg) {
         strcat(msg, "button 8 pressed");
       else if (button == 0x93fff)
         strcat(msg, "button 9 pressed");
+      else if (button == 0xd7fff)
+        strcat(msg, "stay button pressed");
+      else if (button == 0xd8fff)
+        strcat(msg, "away button pressed");
       else
         strcat(msg, "unknown keypad msg");
     }
   }
   else
-    strcpy(msg, "p->k unknown command.");
+    strcpy(msg, "Unknown command from panel");
 
   return cmd; // return command associated with the message
 
@@ -503,19 +530,14 @@ static void * panel_io(void *arg) {
 
 // message i/o thread
 static void * msg_io(void * arg) {
-  int cmd, i, j = 0, res;
-  //int connfd;
-  //int * connfd_ptr;
+  int cmd, i;
   int data0, data1, data2, data3;
   int data4, data5, data6, data7;
   char msg[50] = "", oldPKMsg[50] = "", oldKPMsg[50] = "";
   char word[MAX_BITS] = "", wordk[MAX_BITS] = "";
-  char buf[1024] = "";
+  char buf[128] = "";
   long unsigned index = 0;
   struct timespec t;
-
-  /*connfd_ptr = (int *) arg;
-  connfd = *connfd_ptr;*/
 
   strncpy(wordk, IDLE, MAX_BITS);
   clock_gettime(CLOCK_MONOTONIC, &t);
@@ -534,55 +556,18 @@ static void * msg_io(void * arg) {
       snprintf(buf, sizeof(buf),
                "index:%lu,%-50s data: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
                index++, msg, data0, data1, data2, data3, data4, data5, data6, data7);
+      if (cmd == 0x05) strcpy(ledStatus, msg);
+      if (cmd == 0x27) strcpy(zone1Status, msg);
+      if (cmd == 0x2d) strcpy(zone2Status, msg);
+      if (cmd == 0x34) strcpy(zone3Status, msg);
+      if (cmd == 0x3e) strcpy(zone4Status, msg);
       fputs(buf, stdout);
-      if (cmd == 0x05) strcpy(ledStatus, buf);
+      fflush(stdout);
     }
     if (cmd == 0xff)
       strcpy(oldKPMsg, msg);
     else
       strcpy(oldPKMsg, msg);
-    // get new keypad data - for now just a test
-    /*if (j == 400) {
-      strncpy(wordk, IDLE, MAX_BITS);
-      for (i = 0; i < MAX_BITS; i++) {
-        res = pushElement2(&wordk[i]); // send keypad data to panel
-        if (res == 0) {
-          fprintf(stderr, "msg_io: fifo write error\n");
-          exit(EXIT_FAILURE);
-        }
-      }
-    }
-    else if (j == 800) {
-      strncpy(wordk, IDLE, MAX_BITS);
-      for (i = 0; i < MAX_BITS; i++) {
-        res = pushElement2(&wordk[i]); // send keypad data to panel
-        if (res == 0) {
-          fprintf(stderr, "msg_io: fifo write error\n");
-          exit(EXIT_FAILURE);
-        }
-      }
-    }
-    else if (j == 1200) {
-      strncpy(wordk, IDLE, MAX_BITS);
-      for (i = 0; i < MAX_BITS; i++) {
-        res = pushElement2(&wordk[i]); // send keypad data to panel
-        if (res == 0) {
-          fprintf(stderr, "msg_io: fifo write error\n");
-          exit(EXIT_FAILURE);
-        }
-      }
-    }
-    else if (j == 1600) {
-      strncpy(wordk, IDLE, MAX_BITS);
-      for (i = 0; i < MAX_BITS; i++) {
-        res = pushElement2(&wordk[i]); // send keypad data to panel
-        if (res == 0) {
-          fprintf(stderr, "msg_io: fifo write error\n");
-          exit(EXIT_FAILURE);
-        }
-      }
-    }
-    if (j < 2000) j++; else j = 0;*/
   }
   pthread_exit("message io thread finished");
 } // msg_io
@@ -597,10 +582,16 @@ int main(int argc, char *argv[])
   void *thread_result;
   cpu_set_t cpuset_mio, cpuset_pio;
   FILE *fd;
-  char buffer[256]="", wordk[MAX_BITS] = "";
 
+  char buffer[BUF_LEN]="", wordk[MAX_BITS] = "";
+  char txBuf[250];
+  char addrStr[ADDRSTRLEN];
+  char host[NI_MAXHOST];
+  char service[NI_MAXSERV];
   int listenfd = 0, connfd = 0;
-  struct sockaddr_in serv_addr; 
+  socklen_t addrlen;
+  struct sockaddr_in server_addr;
+  struct sockaddr_in client_addr;
 
   // Check if running with real-time linux.
   uname(&u);
@@ -688,34 +679,78 @@ int main(int argc, char *argv[])
   }
   pthread_attr_destroy(&my_attr);
 
-  /* open socket */
-  signal(SIGPIPE, SIG_IGN);
+  /* open socket and start server */
+  signal(SIGPIPE, SIG_IGN); // receive EPIPE from a failed write()
   listenfd = socket(AF_INET, SOCK_STREAM, 0);
-  memset(&serv_addr, 0, sizeof(serv_addr)); 
-  serv_addr.sin_family = AF_INET;
-  serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  serv_addr.sin_port = htons(4746); 
-  bind(listenfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)); 
-  listen(listenfd, 1);
+  if (listenfd == -1) {
+    perror("server: could not open socket\n");
+    exit(EXIT_FAILURE);
+  }
+  memset(&server_addr, 0, sizeof(server_addr)); 
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  server_addr.sin_port = htons(PORT_NUM); 
+  res = bind(listenfd, (struct sockaddr *) &server_addr, sizeof(server_addr));
+  if (res != 0) {
+    perror("server: bind() failed\n");
+    exit(EXIT_FAILURE);
+  }
+  res = listen(listenfd, BACKLOG);
+  if (res == -1) {
+    perror("server: listen() failed\n");
+    exit(EXIT_FAILURE);
+  }
   for (;;) {
-    connfd = accept(listenfd, (struct sockaddr*)NULL, NULL);
-    bzero(buffer,256);
-    n = read(connfd,buffer,255);
-    if (n < 0) {
-      perror("ERROR reading from socket");
-      exit(-1);
+    memset(&client_addr, 0, sizeof(client_addr));
+    addrlen = sizeof(struct sockaddr_storage);
+    connfd = accept(listenfd, (struct sockaddr *) &client_addr, &addrlen);
+    if (connfd == -1) {
+      perror("server: accept failed\n");
+      continue;
     }
-    write(connfd, ledStatus, strlen(ledStatus));
-    close(connfd);
+    if (getnameinfo ((struct sockaddr *) &client_addr, addrlen,
+        host, NI_MAXHOST, service, NI_MAXSERV, 0) == 0)
+      snprintf(addrStr, ADDRSTRLEN, "(%s, %s)", host, service);
+    else
+      snprintf(addrStr, ADDRSTRLEN, "(?UNKNOWN?)");
+    printf("server: connection requested from %s\n", addrStr);
+    if (hosts_ctl("kprw-server", STRING_UNKNOWN, host, STRING_UNKNOWN) == 0) {
+      fprintf(stderr, "Client %s connection disallowed\n", inet_ntoa(client_addr.sin_addr));
+      close(connfd);
+      continue;
+    }
+    bzero(buffer, BUF_LEN);
+    n = read(connfd, buffer, (BUF_LEN-1));
+    if (n <= 0) {
+      perror("server: error reading from socket");
+      close(connfd);
+      continue;
+    }
+    snprintf(txBuf, sizeof(txBuf), "%s, %s, %s, %s, %s,",
+             ledStatus, zone1Status, zone2Status, zone3Status, zone4Status);
+    res = write(connfd, txBuf, strlen(txBuf));
+    if (res <= 0)
+      fprintf(stderr, "server: error writing to socket\n");
+    res = close(connfd);
+    if (res == -1) {
+      perror("server: error closing connection");
+      continue;
+    }
     num = atoi(buffer);
-    printf("buffer: %s, read number: %i\n", buffer, num);
+    printf("Panel received command: %s", buffer);
     if (strncmp(buffer, "star", 4) == 0)
        strncpy(wordk, STAR, MAX_BITS);
     else if (strncmp(buffer, "pound", 5) == 0)
        strncpy(wordk, POUND, MAX_BITS);
+    else if (strncmp(buffer, "stay", 4) == 0)
+       strncpy(wordk, STAY, MAX_BITS);
+    else if (strncmp(buffer, "away", 4) == 0)
+       strncpy(wordk, AWAY, MAX_BITS);
+    else if (strncmp(buffer, "idle", 4) == 0)
+       strncpy(wordk, IDLE, MAX_BITS);
     else if (strncmp(buffer, "0", 1) == 0)
        strncpy(wordk, ZERO, MAX_BITS);
-    else
+    else if (num > 0 || num < 10)
       switch (num) {
         case 1 :
           strncpy(wordk, ONE, MAX_BITS);
@@ -745,9 +780,13 @@ int main(int argc, char *argv[])
           strncpy(wordk, NINE, MAX_BITS);
           break;
         default :
-          fprintf(stderr, "invalid command\n");
+          fprintf(stderr, "Invalid panel command\n");
           strncpy(wordk, IDLE, MAX_BITS);
       }
+    else {
+      fprintf(stderr, "Invalid panel command\n");
+      strncpy(wordk, IDLE, MAX_BITS);
+    }
     for (i = 0; i < MAX_BITS; i++) {
       res = pushElement2(&wordk[i]); // send keypad data to panel
       if (res == 0) {
@@ -774,8 +813,6 @@ int main(int argc, char *argv[])
     perror("munlockall failed\n");
     exit(EXIT_FAILURE);
   }
-
-  
 
   return 0;
 } // main

@@ -88,7 +88,7 @@ Lindo St. Angel 2015.
 #define HALF_CLK_PER	(500000L) // 0.5 ms half clock period.
 #define SAMPLE_OFFSET   (120000L) // 0.12 ms sample offset from clk edge for panel read
 #define KSAMPLE_OFFSET	(300000L) // 0.30 ms sample offset from clk edge for keypad read
-#define HOLD_DATA	(250000L) // 0.2 ms data hold time from clk edge for keypad write
+#define HOLD_DATA	(220000L) // 0.22 ms data hold time from clk edge for keypad write
 #define CLK_BLANK	(5000000L) // 5 ms min clock blank.
 #define NEW_WORD_VALID	(2500000L) // if a bit arrives > 2.5 ms after last one, declare start of new word.
 #define MAX_BITS	(64) // max 64-bit word read from panel
@@ -242,59 +242,65 @@ static inline unsigned int getBinaryData(char *st, int offset, int length)
 }
 
 // fifo1 - stores panel to keypad and keypad to panel data
-static inline int pushElement1(char *element) {
-  int nextElement;
+static inline int pushElement1(char *element, int num) {
+  int nextElement, i;
   
-  nextElement = (m_Write1 + 1) % FIFO_SIZE;
+  nextElement = (m_Write1 + num) % FIFO_SIZE;
 
-  if (nextElement != m_Read1) {
-    m_Data1[m_Write1] = *element;
-    m_Write1 = nextElement;
-    return 1;
-  }
-  else { // fifo was full and data was overwritten
-    m_Write1 = nextElement;
-    return 0;
-  }
+  if (nextElement != m_Read1) // fifo not full
+    for (i = 0; i < num; i++)
+      m_Data1[m_Write1 + i] = element[i];
+  
+  // if fifo was full, data will be overwritten
+
+  m_Write1 = nextElement;
+  return i; // return number of elements pushed
 }
 
-static inline int popElement1(char *element) {
-  int nextElement;
+static inline int popElement1(char *element, int num) {
+  int nextElement, i;
 
   if (m_Read1 == m_Write1)
     return 0; // fifo is empty
 
-  nextElement = (m_Read1 + 1) % FIFO_SIZE;
-  *element = m_Data1[m_Read1];
+  nextElement = (m_Read1 + num) % FIFO_SIZE;
+
+  for (i = 0; i < num; i++)
+    element[i] = m_Data1[m_Read1 + i];
+
   m_Read1 = nextElement;
-  return 1;
+  return i;
 }
 
 // fifo2 - stores keypad data to be sent to panel
-static inline int pushElement2(char *element) {
-  int nextElement;
+static inline int pushElement2(char *element, int num) {
+  int nextElement, i;
   
-  nextElement = (m_Write2 + 1) % FIFO_SIZE;
+  nextElement = (m_Write2 + num) % FIFO_SIZE;
 
-  if (nextElement != m_Read2) {
-    m_Data2[m_Write2] = *element;
-    m_Write2 = nextElement;
-    return 1;
-  }
+  if (nextElement != m_Read2)
+    for (i = 0; i < num; i++)
+      m_Data2[m_Write2 + i] = element[i];
   else
-    return 0; // fifo is full
+    return 0; // fifo is full, data not overwritten
+
+  m_Write2 = nextElement;
+  return i;
 }
 
-static inline int popElement2(char *element) {
-  int nextElement;
+static inline int popElement2(char *element, int num) {
+  int nextElement, i;
 
   if (m_Read2 == m_Write2)
     return 0; // fifo is empty
 
-  nextElement = (m_Read2 + 1) % FIFO_SIZE;
-  *element = m_Data2[m_Read2];
+  nextElement = (m_Read2 + num) % FIFO_SIZE;
+
+  for (i = 0; i < num; i++)
+    element[i] = m_Data2[m_Read2 + i];
+
   m_Read2 = nextElement;
-  return 1;
+  return i;
 }
 
 // Decode bits from panel into commands and messages.
@@ -306,13 +312,15 @@ static int decode(char * word, char * msg) {
   strcpy(msg, "");
   if (cmd == 0x05) {
     strcpy(msg, "LED Status ");
-    if (getBinaryData(word,12,1)) strcat(msg, "Error ");
-    else if (getBinaryData(word,13,1)) strcat(msg, "Bypass ");
-    else if (getBinaryData(word,14,1)) strcat(msg, "Memory ");
-    else if (getBinaryData(word,15,1)) strcat(msg, "Armed ");
-    else if (getBinaryData(word,16,1)) strcat(msg, "Ready ");
-    else if (getBinaryData(word,17,1)) strcat(msg, "Program ");
-    else strcat(msg, "Not Ready ");
+    if (getBinaryData(word,12,1)) strcat(msg, "Error, ");
+    if (getBinaryData(word,13,1)) strcat(msg, "Bypass, ");
+    if (getBinaryData(word,14,1)) strcat(msg, "Memory, ");
+    if (getBinaryData(word,15,1)) strcat(msg, "Armed, ");
+    if (getBinaryData(word,17,1)) strcat(msg, "Program, ");
+    if (getBinaryData(word,16,1))
+      strcat(msg, "Ready, ");
+    else
+      strcat(msg, "Not Ready, ");
   }
   else if (cmd == 0xa5) {
     sprintf(year3, "%d", getBinaryData(word,9,4));
@@ -449,7 +457,7 @@ static int decode(char * word, char * msg) {
 // panel io thread
 static void * panel_io(void *arg) {
   char word[MAX_BITS] = "", wordkw[MAX_BITS], wordkr[MAX_BITS] ="", wordkr_temp = '0';
-  int flag = 0, bit_cnt = 0, i, res;
+  int flag = 0, bit_cnt = 0, i, res, write_valid = 0;
   struct timespec t, tmark;
 
   strncpy(wordkw, IDLE, MAX_BITS);
@@ -461,34 +469,35 @@ static void * panel_io(void *arg) {
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
     if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) && (flag == 0)) { // write/read keypad data
       if (ts_diff(&t, &tmark) > NEW_WORD_VALID) { // check for new word
-        for (i = 0; i < MAX_BITS; i++) {
-          res = pushElement1(&word[i]); // store p->k data
-          if (res == 0) {
+        //for (i = 0; i < MAX_BITS; i++) {
+          res = pushElement1(word, MAX_BITS); // store p->k data
+          if (res != MAX_BITS)
             fprintf(stderr, "panel_io: fifo write error\n");
-            break;
             //exit(EXIT_FAILURE);
-          }
-        }
-        for (i = 0; i < MAX_BITS; i++) {
-          res = pushElement1(&wordkr[i]); // store k->p data
-          if (res == 0) {
+          //}
+        //}
+        //for (i = 0; i < MAX_BITS; i++) {
+          res = pushElement1(wordkr, MAX_BITS); // store k->p data
+          if (res != MAX_BITS)
             fprintf(stderr, "panel_io: fifo write error\n");
-            break;
             //exit(EXIT_FAILURE);
-          }
-        }
+          //}
+        //}
         if (getBinaryData(word,0,8) == 0x11 || getBinaryData(word,0,16) == 0x0580)
+           /*|| getBinaryData(word,0,8) == 0x16 ||
+            getBinaryData(word,0,8) == 0xc7 || getBinaryData(word,0,16) == 0x0500 || getBinaryData(word,0,8) == 0x80 ||
+            getBinaryData(word,0,8) == 0x38 || getBinaryData(word,0,16) == 0x0546 || getBinaryData(word,0,8) == 0x00 ||
+            getBinaryData(word,0,8) == 0x60 || getBinaryData(word,0,16) == 0x0541)*/
           strncpy(wordkw, IDLE, MAX_BITS); // avoid contention with a keypad responding to panel query
-        else 
-          for (i = 0; i < MAX_BITS; i++) {
-            res = popElement2(&wordkw[i]); // get a keypad command to send to panel
-            if (res == 0) { // fifo is empty so output idle instead of repeating previous
+        else if (getBinaryData(word,0,8) == 0x05 && getBinaryData(word,40,8) == 0x80)
+          //for (i = 0; i < MAX_BITS; i++) {
+            res = popElement2(wordkw, MAX_BITS); // get a keypad command to send to panel
+            if (res != MAX_BITS) // fifo is empty so output idle instead of repeating previous
               strncpy(wordkw, IDLE, MAX_BITS);
-              break;
-            }
-            //printf("res:%i,m_Read2:%d,m_Write2:%d,wordkw[%i]:%c\n",res,m_Read2,m_Write2,i,wordkw[i]);
-          }
+            //printf("panel io res:%i,m_Read2:%d,m_Write2:%d\n",res,m_Read2,m_Write2);
+          //}
         bit_cnt = 0; // reset bit counter and arrays
+        write_valid = 0;
         for (i = 0; i < MAX_BITS; i++) {
            word[i] = '0';
            wordkr[i] = '0';
@@ -503,7 +512,7 @@ static void * panel_io(void *arg) {
         GPIO_CLR = 1<<PI_DATA_OUT; // clear GPIO
       else {
         GPIO_CLR = 1<<PI_DATA_OUT; // clear GPIO
-        fprintf(stderr, "panel_io: bad element in keypad data array wordk\n");
+        //fprintf(stderr, "panel_io: bad element in keypad data array wordk\n");
         //exit(EXIT_FAILURE);
       }
       t.tv_nsec += KSAMPLE_OFFSET;
@@ -522,6 +531,10 @@ static void * panel_io(void *arg) {
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait SAMPLE_OFFSET for valid data
       wordkr[bit_cnt] = wordkr_temp;
       word[bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1'; // invert
+      /*if (bit_cnt == 3 && (word[3] == '0' && word[2] == '1' && word[1] == '1' && word[0] == '0')) {
+        write_valid = 1; // ok to write a keypad word to panel
+        printf("write_valid = 1\n");
+      }*/
       if (bit_cnt >= MAX_BITS) bit_cnt = (MAX_BITS - 1); // never let bit_cnt exceed MAX_BITS
     }
   }
@@ -530,7 +543,7 @@ static void * panel_io(void *arg) {
 
 // message i/o thread
 static void * msg_io(void * arg) {
-  int cmd, i;
+  int cmd;
   int data0, data1, data2, data3;
   int data4, data5, data6, data7;
   char msg[50] = "", oldPKMsg[50] = "", oldKPMsg[50] = "";
@@ -545,14 +558,14 @@ static void * msg_io(void * arg) {
     t.tv_nsec += MSG_IO_UPDATE; // thread runs every MSG_IO_UPDATE seconds
     tnorm(&t);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
-    for (i = 0; i < MAX_BITS; i++)
-      popElement1(&word[i]);
+    popElement1(word, MAX_BITS);
     cmd = decode(word, msg); // decode word from panel into a message
     data0 = getBinaryData(word,0,8);  data1 = getBinaryData(word,8,8);
     data2 = getBinaryData(word,16,8); data3 = getBinaryData(word,24,8);
     data4 = getBinaryData(word,32,8); data5 = getBinaryData(word,40,8);
     data6 = getBinaryData(word,48,8); data7 = getBinaryData(word,56,8);
-    if ((cmd == 0xff && strcmp(msg, oldKPMsg) != 0) || (cmd != 0xff && strcmp(msg, oldPKMsg) != 0)) { // only output changes
+    if ((cmd == 0xff && strcmp(msg, oldKPMsg) != 0) || 
+        (cmd != 0xff && strcmp(msg, oldPKMsg) != 0)) { // only output changes
       snprintf(buf, sizeof(buf),
                "index:%lu,%-50s data: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
                index++, msg, data0, data1, data2, data3, data4, data5, data6, data7);
@@ -574,7 +587,7 @@ static void * msg_io(void * arg) {
 
 int main(int argc, char *argv[])
 {
-  int res, i, crit1, crit2, flag, n, num;
+  int res, crit1, crit2, flag, n, num, i;
   struct sched_param param_main, param_pio;
   struct utsname u;
   pthread_t pio_thread, mio_thread;
@@ -639,7 +652,7 @@ int main(int argc, char *argv[])
   m_Read2 = 0;
   m_Write1 = 0;
   m_Write2 = 0;
-  for (i = 0; i < FIFO_SIZE; i++) {
+  for (i = 0; i < MAX_DATA; i++) {
     m_Data1[i] = '0';
     m_Data2[i] = '0';
   }
@@ -787,13 +800,14 @@ int main(int argc, char *argv[])
       fprintf(stderr, "Invalid panel command\n");
       strncpy(wordk, IDLE, MAX_BITS);
     }
-    for (i = 0; i < MAX_BITS; i++) {
-      res = pushElement2(&wordk[i]); // send keypad data to panel
-      if (res == 0) {
+    //for (i = 0; i < MAX_BITS; i++) {
+      res = pushElement2(wordk, MAX_BITS); // send keypad data to panel
+//printf("server res:%i",res);
+      if (res != MAX_BITS) {
         fprintf(stderr, "msg_io: fifo write error\n");
         exit(EXIT_FAILURE);
       }
-    }
+    //}
   }
 
   //wait for threads to finish

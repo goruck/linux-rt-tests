@@ -26,13 +26,14 @@ Lindo St. Angel 2015.
 #include <pthread.h>
 #include <sys/utsname.h>
 
+// server includes and #defines
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <signal.h>
 #define	PORT_NUM	4746 // port number for server
 #define	BUF_LEN		16 // size of string to hole longest message incl '\n'
-#define BACKLOG		1
+#define BACKLOG		1 // only allow one client to connect
 //#define	_BSD_SOURCE // to get definitions of NI_MAXHOST and NI_MAXSERV from <netdb.h>
 #include <netdb.h>
 #define ADDRSTRLEN	(NI_MAXHOST + NI_MAXSERV + 10)
@@ -128,12 +129,14 @@ Lindo St. Angel 2015.
 // away:	0xff 0xd8 0xff 0xff 0xff 0xff 0xff 0xff
 #define AWAY	"1111111111011000111111111111111111111111111111111111111111111111"
 
-// panel status globals
-char ledStatus[50] = "";
-char zone1Status[50] = "";
-char zone2Status[50] = "";
-char zone3Status[50] = "";
-char zone4Status[50] = "";
+// structure to hold a snapshot of the panel status
+struct status {
+  char ledStatus[50];
+  char zone1Status[50];
+  char zone2Status[50];
+  char zone3Status[50];
+  char zone4Status[50];    
+};
 
 // global for direct gpio access
 volatile unsigned *gpio;
@@ -461,6 +464,13 @@ static void * panel_io(void *arg) {
   int flag = 0, bit_cnt = 0, res;
   struct timespec t, tmark;
 
+  // detach the thread since we don't care about its return status
+  res = pthread_detach(pthread_self());
+  if (res != 0) {
+    perror("panel i/o thread detach failed\n");
+    exit(EXIT_FAILURE);
+  }
+
   strncpy(wordkw, IDLE, MAX_BITS);
   clock_gettime(CLOCK_MONOTONIC, &t);
   tmark = t;
@@ -515,7 +525,6 @@ static void * panel_io(void *arg) {
       if (bit_cnt >= MAX_BITS) bit_cnt = (MAX_BITS - 1); // never let bit_cnt exceed MAX_BITS
     }
   }
-  pthread_exit("panel io thread finished");
 } // panel_io thread
 
 // message i/o thread
@@ -524,10 +533,17 @@ static void * msg_io(void * arg) {
   int data0, data1, data2, data3;
   int data4, data5, data6, data7;
   char msg[50] = "", oldPKMsg[50] = "", oldKPMsg[50] = "";
-  char word[MAX_BITS] = "", wordk[MAX_BITS] = "";
-  char buf[128] = "";
+  char word[MAX_BITS] = "", wordk[MAX_BITS] = "", buf[128] = "";
   long unsigned index = 0;
   struct timespec t;
+  struct status * sptr = (struct status *) arg;
+
+  // detach the thread since we don't care about its return status
+  res = pthread_detach(pthread_self());
+  if (res != 0) {
+    perror("message i/o thread detach failed\n");
+    exit(EXIT_FAILURE);
+  }
 
   strncpy(wordk, IDLE, MAX_BITS);
   clock_gettime(CLOCK_MONOTONIC, &t);
@@ -548,11 +564,11 @@ static void * msg_io(void * arg) {
       snprintf(buf, sizeof(buf),
                "index:%lu,%-50s data: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
                index++, msg, data0, data1, data2, data3, data4, data5, data6, data7);
-      if (cmd == 0x05) strcpy(ledStatus, msg);
-      if (cmd == 0x27) strcpy(zone1Status, msg);
-      if (cmd == 0x2d) strcpy(zone2Status, msg);
-      if (cmd == 0x34) strcpy(zone3Status, msg);
-      if (cmd == 0x3e) strcpy(zone4Status, msg);
+      if (cmd == 0x05) strcpy(sptr->ledStatus, msg);
+      if (cmd == 0x27) strcpy(sptr->zone1Status, msg);
+      if (cmd == 0x2d) strcpy(sptr->zone2Status, msg);
+      if (cmd == 0x34) strcpy(sptr->zone3Status, msg);
+      if (cmd == 0x3e) strcpy(sptr->zone4Status, msg);
       fputs(buf, stdout);
       fflush(stdout);
     }
@@ -561,122 +577,25 @@ static void * msg_io(void * arg) {
     else
       strcpy(oldPKMsg, msg);
   }
-  pthread_exit("message io thread finished");
 } // msg_io
 
-int main(int argc, char *argv[])
-{
-  int res, crit1, crit2, flag, n, num, i;
-  struct sched_param param_main, param_pio;
-  struct utsname u;
-  pthread_t pio_thread, mio_thread;
-  pthread_attr_t my_attr;
-  void *thread_result;
-  cpu_set_t cpuset_mio, cpuset_pio;
-  FILE *fd;
-
+// server
+static int panserv(struct status * pstat) {
   char buffer[BUF_LEN]="", wordk[MAX_BITS] = "";
   char txBuf[250];
   char addrStr[ADDRSTRLEN];
   char host[NI_MAXHOST];
   char service[NI_MAXSERV];
-  int listenfd = 0, connfd = 0;
+  int listenfd = 0, connfd = 0, res, num;
   socklen_t addrlen;
   struct sockaddr_in server_addr;
   struct sockaddr_in client_addr;
 
-  // Check if running with real-time linux.
-  uname(&u);
-  crit1 = (int) strcasestr (u.version, "PREEMPT RT");
-  if ((fd = fopen("/sys/kernel/realtime","r")) != NULL) {
-    crit2 = ((fscanf(fd, "%d", &flag) == 1) && (flag == 1));
-    fclose(fd);
-  }
-  fprintf(stderr, "This is a %s kernel.\n", (crit1 && crit2)  ? "PREEMPT RT" : "vanilla");
-  if (!(crit1 && crit2)) {
-    fprintf(stderr, "Can't run under a vanilla kernel\n");
-    exit(EXIT_FAILURE);
-  }
-
-  // CPU(s) for message i/o thread
-  CPU_ZERO(&cpuset_mio);
-  CPU_SET(1, &cpuset_mio);
-  CPU_SET(2, &cpuset_mio);
-  CPU_SET(3, &cpuset_mio);
-  // CPU(s) for panel i/o thread
-  CPU_ZERO(&cpuset_pio);
-  CPU_SET(0, &cpuset_pio);
-
-  /* Declare ourself as a real time task */
-  param_main.sched_priority = MAIN_PRI;
-  if(sched_setscheduler(0, SCHED_FIFO, &param_main) == -1) {
-    perror("sched_setscheduler failed\n");
-    exit(EXIT_FAILURE);
-  }
-
-  /* Lock memory to prevent page faults */
-  if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1) {
-    perror("mlockall failed\n");
-    exit(EXIT_FAILURE);
-  }
-
-  /* Pre-fault our stack */
-  stack_prefault();
-
-  // Set up gpio pointer for direct register access
-  setup_io();
-
-  // Set up FIFOs
-  m_Read1 = 0;
-  m_Read2 = 0;
-  m_Write1 = 0;
-  m_Write2 = 0;
-  for (i = 0; i < MAX_DATA; i++) {
-    m_Data1[i] = '0';
-    m_Data2[i] = '0';
-  }
-
-  // Set pin direction
-  INP_GPIO(PI_DATA_OUT); // must use INP_GPIO before we can use OUT_GPIO
-  OUT_GPIO(PI_DATA_OUT);
-  INP_GPIO(PI_DATA_IN);
-  INP_GPIO(PI_CLOCK_IN);
-
-  // Set PI_DATA_OUT pin low.
-  GPIO_CLR = 1<<PI_DATA_OUT;
-
-  // create panel input / output thread
-  pthread_attr_init(&my_attr);
-  pthread_attr_setaffinity_np(&my_attr, sizeof(cpuset_pio), &cpuset_pio);
-  pthread_attr_setschedpolicy(&my_attr, SCHED_FIFO);
-  param_pio.sched_priority = PANEL_IO_PRI;
-  pthread_attr_setschedparam(&my_attr, &param_pio);
-  res = pthread_create(&pio_thread, &my_attr, panel_io, NULL);
-  if (res != 0) {
-    perror("Panel i/o thread creation failed\n");
-    exit(EXIT_FAILURE);
-  }
-  pthread_attr_destroy(&my_attr);
-
-  // create message input / output thread
-  pthread_attr_init(&my_attr);
-  pthread_attr_setaffinity_np(&my_attr, sizeof(cpuset_mio), &cpuset_mio);
-  pthread_attr_setschedpolicy(&my_attr, SCHED_FIFO);
-  param_pio.sched_priority = MSG_IO_PRI;
-  pthread_attr_setschedparam(&my_attr, &param_pio);
-  res = pthread_create(&mio_thread, &my_attr, msg_io, NULL);
-  if (res != 0) {
-    perror("Message i/o thread creation failed\n");
-    exit(EXIT_FAILURE);
-  }
-  pthread_attr_destroy(&my_attr);
-
-  /* open socket and start server */
   signal(SIGPIPE, SIG_IGN); // receive EPIPE from a failed write()
   listenfd = socket(AF_INET, SOCK_STREAM, 0);
   if (listenfd == -1) {
     perror("server: could not open socket\n");
-    exit(EXIT_FAILURE);
+    return(1);
   }
   memset(&server_addr, 0, sizeof(server_addr)); 
   server_addr.sin_family = AF_INET;
@@ -685,12 +604,12 @@ int main(int argc, char *argv[])
   res = bind(listenfd, (struct sockaddr *) &server_addr, sizeof(server_addr));
   if (res != 0) {
     perror("server: bind() failed\n");
-    exit(EXIT_FAILURE);
+    return(1);
   }
   res = listen(listenfd, BACKLOG);
   if (res == -1) {
     perror("server: listen() failed\n");
-    exit(EXIT_FAILURE);
+    return(1);
   }
   for (;;) {
     memset(&client_addr, 0, sizeof(client_addr));
@@ -712,14 +631,15 @@ int main(int argc, char *argv[])
       continue;
     }
     memset(&buffer, 0, BUF_LEN);
-    n = read(connfd, buffer, (BUF_LEN-1));
-    if (n <= 0) {
+    res = read(connfd, buffer, (BUF_LEN-1));
+    if (res <= 0) {
       perror("server: error reading from socket");
       close(connfd);
       continue;
     }
     snprintf(txBuf, sizeof(txBuf), "%s, %s, %s, %s, %s,",
-             ledStatus, zone1Status, zone2Status, zone3Status, zone4Status);
+             pstat->ledStatus, pstat->zone1Status, pstat->zone2Status,
+             pstat->zone3Status, pstat->zone4Status);
     res = write(connfd, txBuf, strlen(txBuf));
     if (res <= 0)
       fprintf(stderr, "server: error writing to socket\n");
@@ -782,21 +702,114 @@ int main(int argc, char *argv[])
     res = pushElement2(wordk, MAX_BITS); // send keypad data to panel
     if (res != MAX_BITS) {
       fprintf(stderr, "server: fifo write error\n");
-      exit(EXIT_FAILURE);
+      return(1);
     }
   }
+  return(0);
+} // panserv
 
-  //wait for threads to finish
-  res = pthread_join(pio_thread, &thread_result);
-  if (res != 0) {
-    perror("Panel i/o thread join failed\n");
+int main(int argc, char *argv[])
+{
+  int res, crit1, crit2, flag, i;
+  struct sched_param param_main, param_pio;
+  struct utsname u;
+  struct status pstat;
+  pthread_t pio_thread, mio_thread;
+  pthread_attr_t my_attr;
+  cpu_set_t cpuset_mio, cpuset_pio;
+  FILE *fd;
+
+  // Check if running with real-time linux.
+  uname(&u);
+  crit1 = (int) strcasestr (u.version, "PREEMPT RT");
+  if ((fd = fopen("/sys/kernel/realtime","r")) != NULL) {
+    crit2 = ((fscanf(fd, "%d", &flag) == 1) && (flag == 1));
+    fclose(fd);
+  }
+  fprintf(stderr, "This is a %s kernel.\n", (crit1 && crit2)  ? "PREEMPT RT" : "vanilla");
+  if (!(crit1 && crit2)) {
+    fprintf(stderr, "Can't run under a vanilla kernel\n");
     exit(EXIT_FAILURE);
   }
-  res = pthread_join(mio_thread, &thread_result);
-  if (res != 0) {
-    perror("Message i/o thread join failed\n");
+
+  // CPU(s) for message i/o thread
+  CPU_ZERO(&cpuset_mio);
+  CPU_SET(1, &cpuset_mio);
+  CPU_SET(2, &cpuset_mio);
+  CPU_SET(3, &cpuset_mio);
+  // CPU(s) for panel i/o thread
+  CPU_ZERO(&cpuset_pio);
+  CPU_SET(0, &cpuset_pio);
+
+  /* Declare ourself as a real time task */
+  param_main.sched_priority = MAIN_PRI;
+  if(sched_setscheduler(0, SCHED_FIFO, &param_main) == -1) {
+    perror("sched_setscheduler failed\n");
     exit(EXIT_FAILURE);
   }
+
+  /* Lock memory to prevent page faults */
+  if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1) {
+    perror("mlockall failed\n");
+    exit(EXIT_FAILURE);
+  }
+
+  /* Pre-fault our stack */
+  stack_prefault();
+
+  // Set up gpio pointer for direct register access
+  setup_io();
+
+  // Set up FIFOs
+  m_Read1 = 0;
+  m_Read2 = 0;
+  m_Write1 = 0;
+  m_Write2 = 0;
+  for (i = 0; i < MAX_DATA; i++) {
+    m_Data1[i] = '0';
+    m_Data2[i] = '0';
+  }
+
+  // init panel status indicators
+  memset(&pstat, 0, sizeof(pstat));
+
+  // Set pin direction
+  INP_GPIO(PI_DATA_OUT); // must use INP_GPIO before we can use OUT_GPIO
+  OUT_GPIO(PI_DATA_OUT);
+  INP_GPIO(PI_DATA_IN);
+  INP_GPIO(PI_CLOCK_IN);
+
+  // Set PI_DATA_OUT pin low.
+  GPIO_CLR = 1<<PI_DATA_OUT;
+
+  // create panel input / output thread
+  pthread_attr_init(&my_attr);
+  pthread_attr_setaffinity_np(&my_attr, sizeof(cpuset_pio), &cpuset_pio);
+  pthread_attr_setschedpolicy(&my_attr, SCHED_FIFO);
+  param_pio.sched_priority = PANEL_IO_PRI;
+  pthread_attr_setschedparam(&my_attr, &param_pio);
+  res = pthread_create(&pio_thread, &my_attr, panel_io, NULL);
+  if (res != 0) {
+    perror("Panel i/o thread creation failed\n");
+    exit(EXIT_FAILURE);
+  }
+  pthread_attr_destroy(&my_attr);
+
+  // create message input / output thread
+  pthread_attr_init(&my_attr);
+  pthread_attr_setaffinity_np(&my_attr, sizeof(cpuset_mio), &cpuset_mio);
+  pthread_attr_setschedpolicy(&my_attr, SCHED_FIFO);
+  param_pio.sched_priority = MSG_IO_PRI;
+  pthread_attr_setschedparam(&my_attr, &param_pio);
+  res = pthread_create(&mio_thread, &my_attr, msg_io, (void *) &pstat);
+  if (res != 0) {
+    perror("Message i/o thread creation failed\n");
+    exit(EXIT_FAILURE);
+  }
+  pthread_attr_destroy(&my_attr);
+
+  // start server
+  panserv(&pstat);
 
   /* Unlock memory */
   if(munlockall() == -1) {

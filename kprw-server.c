@@ -2,7 +2,7 @@
 
 kprw-server.c
 
-compile with "gcc -Wall -o kprw-server kprw-server.c -lrt -lpthread -lwrap"
+compile with "gcc -Wall -o kprw-server kprw-server.c -lrt -lpthread -lwrap -lssl -lcrypto"
 
 must run under linux PREEMPT_RT kernel 3.18.9-rt5-v7
 
@@ -26,7 +26,7 @@ Lindo St. Angel 2015.
 #include <pthread.h>
 #include <sys/utsname.h>
 
-// server includes and #defines
+// socket
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -39,6 +39,10 @@ Lindo St. Angel 2015.
 #define ADDRSTRLEN	(NI_MAXHOST + NI_MAXSERV + 10)
 #include <tcpd.h> //for hosts_ctl()
 
+// openssl
+#include <openssl/ssl.h>
+#include <openssl/err.h>
+#include <openssl/evp.h>
 
 // GPIO Access from ARM Running Linux. Based on Dom and Gert rev 15-feb-13
 #define BCM2708_PERI_BASE	0x3F000000 /* modified for Pi 2 */
@@ -580,74 +584,173 @@ static void * msg_io(void * arg) {
 } // msg_io
 
 // server
-static int panserv(struct status * pstat) {
+static int create_socket(int port)
+{
+  int listenfd = 0, res;
+  struct sockaddr_in server_addr;
+  
+  listenfd = socket(AF_INET, SOCK_STREAM, 0);
+  if (listenfd == -1) {
+    perror("server: could not open socket\n");
+    exit(EXIT_FAILURE);;
+  }
+  memset(&server_addr, 0, sizeof(server_addr)); 
+  server_addr.sin_family = AF_INET;
+  server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+  server_addr.sin_port = htons(port); 
+  res = bind(listenfd, (struct sockaddr *) &server_addr, sizeof(server_addr));
+  if (res != 0) {
+    perror("server: bind() failed\n");
+    exit(EXIT_FAILURE);;
+  }
+  res = listen(listenfd, BACKLOG);
+  if (res == -1) {
+    perror("server: listen() failed\n");
+    exit(EXIT_FAILURE);;
+  }
+  return listenfd;
+} // create_socket()
+
+// openssl - reference: https://wiki.openssl.org/index.php/Simple_TLS_Server
+
+static void init_openssl() {
+  SSL_library_init();
+  OpenSSL_add_all_algorithms(); 
+  SSL_load_error_strings();	
+} // openssl()
+
+static void cleanup_openssl() {
+  EVP_cleanup();
+} // cleanup_openssl()
+
+static SSL_CTX *create_context() {
+  const SSL_METHOD *method;
+  SSL_CTX *ctx;
+
+  method = SSLv23_server_method();
+
+  ctx = SSL_CTX_new(method);
+  if (!ctx) {
+    perror("Unable to create SSL context");
+    ERR_print_errors_fp(stderr);
+    exit(EXIT_FAILURE);
+  }
+
+  return ctx;
+} // *create_context()
+
+static void configure_context(SSL_CTX *ctx) {
+  //SSL_CTX_set_ecdh_auto(ctx, 1); // supported from openssl 1.0.2, using 1.0.1e
+
+  /* set the key and cert - generated from the following command:
+  $ openssl req -x509 -sha256 -nodes -days 365 -newkey rsa:2048 -keyout privateKey.key -out certificate.crt */
+
+  if (SSL_CTX_use_certificate_file(ctx, "/home/pi/certificate.crt", SSL_FILETYPE_PEM) < 0) {
+    ERR_print_errors_fp(stderr);
+    exit(EXIT_FAILURE);
+  }
+
+  if (SSL_CTX_use_PrivateKey_file(ctx, "/home/pi/privateKey.key", SSL_FILETYPE_PEM) < 0 ) {
+    ERR_print_errors_fp(stderr);
+    exit(EXIT_FAILURE);
+  }
+
+  // check if the server certificate and private-key matches
+  if (SSL_CTX_check_private_key(ctx) != 1) {
+    fprintf(stderr, "Private key does not match the certificate public key\n");
+    exit(EXIT_FAILURE);
+  }
+
+  // used only if client authentication will be used
+  SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER|SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+
+  // set the list of trusted CAs
+  if (SSL_CTX_load_verify_locations(ctx, "/home/pi/certificate.crt", NULL) < 1) {
+    fprintf(stderr, "Error setting the verify locations.\n");
+    exit(EXIT_FAILURE);
+  }
+} // configure_context()
+
+static void panserv(struct status * pstat) {
   char buffer[BUF_LEN]="", wordk[MAX_BITS] = "";
   char txBuf[250];
   char addrStr[ADDRSTRLEN];
   char host[NI_MAXHOST];
   char service[NI_MAXSERV];
-  int listenfd = 0, connfd = 0, res, num;
-  socklen_t addrlen;
-  struct sockaddr_in server_addr;
+  int listenfd= 0, connfd = 0, res, num;
+  socklen_t addrlen;  
   struct sockaddr_in client_addr;
+  SSL_CTX *ctx;
+  SSL *ssl;
+
+  init_openssl();
+  ctx = create_context();
+  configure_context(ctx);
+
+  listenfd = create_socket(PORT_NUM);
 
   signal(SIGPIPE, SIG_IGN); // receive EPIPE from a failed write()
-  listenfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (listenfd == -1) {
-    perror("server: could not open socket\n");
-    return(1);
-  }
-  memset(&server_addr, 0, sizeof(server_addr)); 
-  server_addr.sin_family = AF_INET;
-  server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-  server_addr.sin_port = htons(PORT_NUM); 
-  res = bind(listenfd, (struct sockaddr *) &server_addr, sizeof(server_addr));
-  if (res != 0) {
-    perror("server: bind() failed\n");
-    return(1);
-  }
-  res = listen(listenfd, BACKLOG);
-  if (res == -1) {
-    perror("server: listen() failed\n");
-    return(1);
-  }
+
   for (;;) {
     memset(&client_addr, 0, sizeof(client_addr));
     addrlen = sizeof(struct sockaddr_storage);
+
     connfd = accept(listenfd, (struct sockaddr *) &client_addr, &addrlen);
     if (connfd == -1) {
       perror("server: accept failed\n");
       continue;
     }
+
     if (getnameinfo ((struct sockaddr *) &client_addr, addrlen,
         host, NI_MAXHOST, service, NI_MAXSERV, 0) == 0)
       snprintf(addrStr, ADDRSTRLEN, "(%s, %s)", host, service);
     else
       snprintf(addrStr, ADDRSTRLEN, "(?UNKNOWN?)");
     printf("server: connection requested from %s\n", addrStr);
+
     if (hosts_ctl("kprw-server", STRING_UNKNOWN, host, STRING_UNKNOWN) == 0) {
       fprintf(stderr, "Client %s connection disallowed\n", inet_ntoa(client_addr.sin_addr));
       close(connfd);
       continue;
     }
-    memset(&buffer, 0, BUF_LEN);
-    res = read(connfd, buffer, (BUF_LEN-1));
-    if (res <= 0) {
-      perror("server: error reading from socket");
+
+    ssl = SSL_new(ctx);
+    SSL_set_fd(ssl, connfd);
+
+    if (SSL_accept(ssl) <= 0) {
+      ERR_print_errors_fp(stderr);
+      SSL_free(ssl);
       close(connfd);
       continue;
     }
+
+    memset(&buffer, 0, BUF_LEN);
+    res = SSL_read(ssl, buffer, (BUF_LEN-1));
+    if (res <= 0) {
+      ERR_print_errors_fp(stderr);
+      SSL_free(ssl);
+      close(connfd);
+      continue;
+    }
+
     snprintf(txBuf, sizeof(txBuf), "%s, %s, %s, %s, %s,",
              pstat->ledStatus, pstat->zone1Status, pstat->zone2Status,
              pstat->zone3Status, pstat->zone4Status);
-    res = write(connfd, txBuf, strlen(txBuf));
-    if (res <= 0)
-      fprintf(stderr, "server: error writing to socket\n");
+    res = SSL_write(ssl, txBuf, strlen(txBuf));
+    if (res <= 0) {
+      ERR_print_errors_fp(stderr);
+      SSL_free(ssl);
+      close(connfd);
+      continue;
+    }
+
+    SSL_free(ssl);
     res = close(connfd);
     if (res == -1) {
       perror("server: error closing connection");
       continue;
     }
+
     num = atoi(buffer);
     printf("server: panel received command %s", buffer);
     if (strncmp(buffer, "star", 4) == 0)
@@ -699,13 +802,20 @@ static int panserv(struct status * pstat) {
       fprintf(stderr, "server: invalid panel command\n");
       strncpy(wordk, IDLE, MAX_BITS);
     }
+
     res = pushElement2(wordk, MAX_BITS); // send keypad data to panel
     if (res != MAX_BITS) {
       fprintf(stderr, "server: fifo write error\n");
-      return(1);
+      break;
     }
+
   }
-  return(0);
+
+  close(listenfd);
+  SSL_CTX_free(ctx);
+  cleanup_openssl();
+
+  return;
 } // panserv
 
 int main(int argc, char *argv[])
@@ -811,11 +921,11 @@ int main(int argc, char *argv[])
   // start server
   panserv(&pstat);
 
-  /* Unlock memory */
+  // cleanup - unlock memory
   if(munlockall() == -1) {
     perror("munlockall failed\n");
     exit(EXIT_FAILURE);
   }
 
-  return 0;
+  return(0);
 } // main

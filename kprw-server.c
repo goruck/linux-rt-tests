@@ -83,9 +83,9 @@ Lindo St. Angel 2015.
 #define INV(g,s)	((1<<g) - s)
 
 // real-time
-#define MAIN_PRI	(20) // main thread priority
-#define MSG_IO_PRI	(50) // message io thread priority
-#define PANEL_IO_PRI	(90) // panel io thread priority
+#define MAIN_PRI	(70) // main thread priority
+#define MSG_IO_PRI	(70) // message io thread priority
+#define PANEL_IO_PRI	(90) // panel io thread priority - panel io pri must be highest
 #define MAX_SAFE_STACK  (100*1024) // 100KB
 #define NSEC_PER_SEC    (1000000000LU) // 1 second.
 #define INTERVAL        (10*1000) // 10 us timeslice.
@@ -161,13 +161,13 @@ static void setup_io(void) {
   int  mem_fd;
   void *gpio_map;
 
-  /* open /dev/mem */
+  // open /dev/mem
   if ((mem_fd = open("/dev/mem", O_RDWR|O_SYNC) ) < 0) {
     perror("can't open /dev/mem \n");
     exit(EXIT_FAILURE);
   }
 
-  /* mmap GPIO */
+  // mmap GPIO
   gpio_map = mmap(
     NULL,             		//Any adddress in our space will do
     BLOCK_SIZE,			//Map length
@@ -177,7 +177,7 @@ static void setup_io(void) {
     GPIO_BASE         		//Offset to GPIO peripheral
   );
 
-  close(mem_fd); //No need to keep mem_fd open after mmap
+  close(mem_fd); // No need to keep mem_fd open after mmap
 
   if (gpio_map == MAP_FAILED) {
     fprintf(stderr, "mmap error %d\n", (int) gpio_map); //errno also set!
@@ -318,7 +318,7 @@ static int decode(char * word, char * msg) {
 
   cmd = getBinaryData(word,0,8);
   strcpy(msg, "");
-  if (cmd == 0x05) {
+  if (cmd == 0x05) { 
     strcpy(msg, "LED Status ");
     if (getBinaryData(word,16,1))
       strcat(msg, "Ready, ");
@@ -482,24 +482,35 @@ static void * panel_io(void *arg) {
     t.tv_nsec += INTERVAL;
     tnorm(&t);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+
     if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_HI) && (flag == 0)) { // write/read keypad data
       if (ts_diff(&t, &tmark) > NEW_WORD_VALID) { // check for new word
         res = pushElement1(word, MAX_BITS); // store p->k data
         if (res != MAX_BITS)
           fprintf(stderr, "panel_io: fifo write error\n"); // record error and continue
+
         res = pushElement1(wordkr, MAX_BITS); // store k->p data
         if (res != MAX_BITS)
           fprintf(stderr, "panel_io: fifo write error\n");
+
+        /*
+         * safe to send data check may have been related to a real-time issue
+         * with the current thread priorities, its probably not needed
+         * keep for now and verify with further testing
+         */ 
         if (getBinaryData(word,0,8) == 0x05 && getBinaryData(word,32,1) == 0x1) // safe to send keypad data
           res = popElement2(wordkw, MAX_BITS); // get a keypad command to send to panel
           if (res != MAX_BITS) // fifo is empty so output idle instead of repeating previous
             strncpy(wordkw, IDLE, MAX_BITS);
+
         bit_cnt = 0; // reset bit counter and arrays
         memset(&word, 0, MAX_BITS);
         memset(&wordkr, 0, MAX_BITS);
       }
+
       tmark = t; // mark new word time
       flag = 1; // set flag to indicate clock was high
+
       // write keypad data bit to panel once every time clock is high
       if (wordkw[bit_cnt] == '0') // invert
         GPIO_SET = 1<<PI_DATA_OUT; // set GPIO
@@ -510,10 +521,12 @@ static void * panel_io(void *arg) {
         fprintf(stderr, "panel_io: bad element in keypad data array wordk\n");
         //exit(EXIT_FAILURE);
       }
+
       t.tv_nsec += KSAMPLE_OFFSET;
       tnorm(&t);
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait KSAMPLE_OFFSET for valid data
       wordkr_temp = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1'; // invert
+
       t.tv_nsec += HOLD_DATA;
       tnorm(&t);
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait HOLD_DATA time
@@ -521,11 +534,13 @@ static void * panel_io(void *arg) {
     }
     else if ((GET_GPIO(PI_CLOCK_IN) == PI_CLOCK_LO) && (flag == 1)) { // read panel data
       flag = 0;
+
       t.tv_nsec += SAMPLE_OFFSET;
       tnorm(&t);
       clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL); // wait SAMPLE_OFFSET for valid data
       wordkr[bit_cnt] = wordkr_temp;
       word[bit_cnt++] = (GET_GPIO(PI_DATA_IN) == PI_DATA_HI) ? '0' : '1'; // invert
+
       if (bit_cnt >= MAX_BITS) bit_cnt = (MAX_BITS - 1); // never let bit_cnt exceed MAX_BITS
     }
   }
@@ -555,24 +570,39 @@ static void * msg_io(void * arg) {
     t.tv_nsec += MSG_IO_UPDATE; // thread runs every MSG_IO_UPDATE seconds
     tnorm(&t);
     clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, NULL);
+
+    // get raw data from fifo
     res = popElement1(word, MAX_BITS);
     if (res != 0 && res != MAX_BITS) // fifo will be empty most of the time
       fprintf(stderr, "msg_io: fifo read error\n"); // record error and continue
+
+    // todo : add CRC check of raw data
+
     cmd = decode(word, msg); // decode word from panel into a message
+
+    // update panel status
+    /* filter bad status - not sure its needed with current thread priorities
+     * needs further testing but keeping check for now
+     */ 
+    if (cmd == 0x05 && getBinaryData(word,32,1) == 0x1) // filter bad status
+      strcpy(sptr->ledStatus, msg);
+    if (cmd == 0x27) strcpy(sptr->zone1Status, msg);
+    if (cmd == 0x2d) strcpy(sptr->zone2Status, msg);
+    if (cmd == 0x34) strcpy(sptr->zone3Status, msg);
+    if (cmd == 0x3e) strcpy(sptr->zone4Status, msg);
+
+    // get raw data bytes
     data0 = getBinaryData(word,0,8);  data1 = getBinaryData(word,8,8);
     data2 = getBinaryData(word,16,8); data3 = getBinaryData(word,24,8);
     data4 = getBinaryData(word,32,8); data5 = getBinaryData(word,40,8);
     data6 = getBinaryData(word,48,8); data7 = getBinaryData(word,56,8);
+
+    // output panel to keypad and sensor traffic
     if ((cmd == 0xff && strcmp(msg, oldKPMsg) != 0) || 
         (cmd != 0xff && strcmp(msg, oldPKMsg) != 0)) { // only output changes
       snprintf(buf, sizeof(buf),
                "index:%lu,%-50s data: 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x 0x%02x\n",
                index++, msg, data0, data1, data2, data3, data4, data5, data6, data7);
-      if (cmd == 0x05) strcpy(sptr->ledStatus, msg);
-      if (cmd == 0x27) strcpy(sptr->zone1Status, msg);
-      if (cmd == 0x2d) strcpy(sptr->zone2Status, msg);
-      if (cmd == 0x34) strcpy(sptr->zone3Status, msg);
-      if (cmd == 0x3e) strcpy(sptr->zone4Status, msg);
       fputs(buf, stdout);
       fflush(stdout);
     }
@@ -642,8 +672,12 @@ static SSL_CTX *create_context() {
 static void configure_context(SSL_CTX *ctx) {
   //SSL_CTX_set_ecdh_auto(ctx, 1); // supported from openssl 1.0.2, using 1.0.1e
 
-  /* set the key and cert - generated from the following command:
-  $ openssl req -x509 -sha256 -nodes -days 365 -newkey rsa:2048 -keyout privateKey.key -out certificate.crt */
+  /* generate a private key and a self-signed cert from the following commands:
+   * $ openssl genrsa -out privateKey.key 2048
+   * $ openssl req -new -key privateKey.key -out privateKey.csr
+   * $ openssl x509 -req -in privateKey.csr -signkey privateKey.key -out certificate.crt -days 500 -extfile key.ext
+   * where : key.ext contains "subjectAltName = IP:xxx.xxx.xxx.xxx"
+   */
 
   if (SSL_CTX_use_certificate_file(ctx, "/home/pi/certificate.crt", SSL_FILETYPE_PEM) < 0) {
     ERR_print_errors_fp(stderr);
@@ -661,8 +695,8 @@ static void configure_context(SSL_CTX *ctx) {
     exit(EXIT_FAILURE);
   }
 
-  // used only if client authentication will be used
-  SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER|SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+  // currently not using client authentication, so flag = SSL_VERIFY_NONE
+  SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
 
   // set the list of trusted CAs
   if (SSL_CTX_load_verify_locations(ctx, "/home/pi/certificate.crt", NULL) < 1) {
@@ -732,6 +766,9 @@ static void panserv(struct status * pstat) {
       close(connfd);
       continue;
     }
+
+    printf("server: client %s connected with %s encryption\n",
+           inet_ntoa(client_addr.sin_addr), SSL_get_cipher(ssl));
 
     snprintf(txBuf, sizeof(txBuf), "%s, %s, %s, %s, %s,",
              pstat->ledStatus, pstat->zone1Status, pstat->zone2Status,
@@ -803,7 +840,8 @@ static void panserv(struct status * pstat) {
       strncpy(wordk, IDLE, MAX_BITS);
     }
 
-    res = pushElement2(wordk, MAX_BITS); // send keypad data to panel
+    // send keypad data to panel
+    res = pushElement2(wordk, MAX_BITS);
     if (res != MAX_BITS) {
       fprintf(stderr, "server: fifo write error\n");
       break;
@@ -851,20 +889,20 @@ int main(int argc, char *argv[])
   CPU_ZERO(&cpuset_pio);
   CPU_SET(0, &cpuset_pio);
 
-  /* Declare ourself as a real time task */
+  // Declare ourself as a real time task
   param_main.sched_priority = MAIN_PRI;
   if(sched_setscheduler(0, SCHED_FIFO, &param_main) == -1) {
     perror("sched_setscheduler failed\n");
     exit(EXIT_FAILURE);
   }
 
-  /* Lock memory to prevent page faults */
+  // Lock memory to prevent page faults
   if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1) {
     perror("mlockall failed\n");
     exit(EXIT_FAILURE);
   }
 
-  /* Pre-fault our stack */
+  // Pre-fault our stack
   stack_prefault();
 
   // Set up gpio pointer for direct register access
